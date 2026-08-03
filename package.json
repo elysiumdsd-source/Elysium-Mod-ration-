@@ -1,0 +1,14 @@
+{
+  "name": "elysium-moderation-bot",
+  "version": "1.0.0",
+  "description": "Bot de modération Discord pour Elysium avec warns, bans, logs, tickets et commandes d'information.",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.0"
+  }
+}

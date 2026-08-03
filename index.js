@@ -16,6 +16,8 @@ const {
   AttachmentBuilder,
   ActionRowBuilder,
   StringSelectMenuBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   ChannelType,
   PermissionFlagsBits,
   PermissionsBitField
@@ -158,6 +160,8 @@ const TICKET_CATEGORIES = [
   { emoji: '📌', value: 'claim', label: 'Claim' }
 ];
 
+const STAFF_ROLE_IDS = ['1533835913065398333', '1533499987810324571', '1533836673430065282'];
+
 const TICKET_REPLIES = {
   'aide-economie': [
     'Je prépare un ticket économique, tiens-toi prêt !',
@@ -183,6 +187,11 @@ const TICKET_REPLIES = {
 
 function isAdmin(userId) {
   return adminIds.includes(userId);
+}
+
+function hasStaffRole(member) {
+  if (!member?.roles?.cache) return false;
+  return member.roles.cache.some((role) => STAFF_ROLE_IDS.includes(role.id));
 }
 
 function loadWarnings() {
@@ -489,8 +498,61 @@ async function createTicketChannel(guild, user, categoryValue) {
       .addFields({ name: 'Fermeture', value: 'Utilisez `+close` pour fermer ce ticket.', inline: false })
       .setFooter({ text: 'Elysium • Support Ticket' })
       .setTimestamp();
-  await channel.send({ content: `<@${user.id}>`, embeds: [embed] });
+
+  const claimButton = new ButtonBuilder()
+    .setCustomId('claim_ticket')
+    .setLabel('Claim')
+    .setStyle(ButtonStyle.Success);
+
+  const row = new ActionRowBuilder().addComponents(claimButton);
+  await channel.send({
+    content: `<@${user.id}> <@&1533835913065398333> <@&1533499987810324571> <@&1533836673430065282>`,
+    embeds: [embed],
+    components: [row]
+  });
   return channel;
+}
+
+async function refreshTicketPanel(guild) {
+  if (!guild || !ticketPanelChannelId) return;
+
+  const panelChannel = guild.channels.cache.get(ticketPanelChannelId) || await guild.channels.fetch(ticketPanelChannelId).catch(() => null);
+  if (!panelChannel || !panelChannel.isTextBased()) return;
+
+  const panels = loadTicketPanels();
+  const existingPanelId = panels[guild.id];
+  if (existingPanelId) {
+    try {
+      const oldMsg = await panelChannel.messages.fetch(existingPanelId);
+      await oldMsg.delete();
+    } catch {
+      // ignore
+    }
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(BOT_COLORS.default)
+    .setTitle(`${EMOJIS.categories} Panel de tickets`)
+    .setDescription('Choisis une option ci-dessous pour créer ton ticket. Les admins seront alertés automatiquement.')
+    .setFooter({ text: 'Elysium • Ticket System' })
+    .setTimestamp();
+
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId('ticket_select')
+    .setPlaceholder('Sélectionne le type de ticket...')
+    .addOptions(TICKET_CATEGORIES.map((item) => ({
+      label: item.label,
+      value: item.value,
+      description: item.label,
+      emoji: item.emoji
+    })));
+
+  const row = new ActionRowBuilder().addComponents(menu);
+  const sent = await panelChannel.send({ embeds: [embed], components: [row] });
+
+  panels[guild.id] = sent.id;
+  saveTicketPanels(panels);
+  console.log(`🆕 Panneau de tickets rafraîchi dans ${panelChannel.name} (${guild.name}).`);
 }
 
 client.once('ready', async () => {
@@ -505,42 +567,13 @@ client.once('ready', async () => {
       return;
     }
 
-    const panelChannel = ticketPanelChannelId ? (guild.channels.cache.get(ticketPanelChannelId) || await guild.channels.fetch(ticketPanelChannelId).catch(() => null)) : null;
-    if (panelChannel && panelChannel.isTextBased()) {
-      const panels = loadTicketPanels();
-      const existingPanelId = panels[guild.id];
-      if (existingPanelId) {
-        try {
-          const oldMsg = await panelChannel.messages.fetch(existingPanelId);
-          await oldMsg.delete();
-        } catch {
-          // ignore
-        }
-      }
+    await refreshTicketPanel(guild);
 
-      const embed = new EmbedBuilder()
-        .setColor(BOT_COLORS.default)
-        .setTitle(`${EMOJIS.categories} Panel de tickets`)
-        .setDescription('Choisis une option ci-dessous pour créer ton ticket. Les admins seront alertés automatiquement.')
-        .setFooter({ text: 'Elysium • Ticket System' })
-        .setTimestamp();
-
-      const menu = new StringSelectMenuBuilder()
-        .setCustomId('ticket_select')
-        .setPlaceholder('Sélectionne le type de ticket...')
-        .addOptions(TICKET_CATEGORIES.map((item) => ({
-          label: item.label,
-          value: item.value,
-          description: item.label,
-          emoji: item.emoji
-        })));
-
-      const row = new ActionRowBuilder().addComponents(menu);
-      const sent = await panelChannel.send({ embeds: [embed], components: [row] });
-
-      panels[guild.id] = sent.id;
-      saveTicketPanels(panels);
-    }
+    setInterval(() => {
+      refreshTicketPanel(guild).catch((error) => {
+        console.error('❌ Erreur lors du rafraîchissement du panneau de tickets :', error.message);
+      });
+    }, 30 * 60 * 1000);
   }
 });
 
@@ -578,6 +611,27 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
 });
 
 client.on('interactionCreate', async (interaction) => {
+  if (interaction.isButton() && interaction.customId === 'claim_ticket') {
+    const member = interaction.member;
+    if (!member || (!isAdmin(member.user.id) && !hasStaffRole(member))) {
+      await interaction.reply({ content: 'Seuls les admins/staff peuvent claim ce ticket.', ephemeral: true });
+      return;
+    }
+
+    const claimRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('claim_ticket')
+        .setLabel('Claimé')
+        .setStyle(ButtonStyle.Success)
+        .setDisabled(true)
+    );
+
+    await interaction.message.edit({ components: [claimRow] });
+    await interaction.reply({ content: `Ticket claimé par ${member.user}.`, ephemeral: true });
+    await interaction.channel.send({ content: `${member.user} a claimé ce ticket.` });
+    return;
+  }
+
   if (!interaction.isStringSelectMenu() || interaction.customId !== 'ticket_select') return;
 
   const ticketType = interaction.values[0];

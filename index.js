@@ -7,6 +7,8 @@ const {
   Partials,
   EmbedBuilder,
   AttachmentBuilder,
+  ActionRowBuilder,
+  StringSelectMenuBuilder,
   ChannelType,
   PermissionFlagsBits,
   PermissionsBitField
@@ -30,20 +32,20 @@ const adminIds = (process.env.ADMIN_IDS || '1497279403619647648,8274921507605708
   .filter(Boolean);
 
 const EMOJIS = {
-  success: '✅',
-  error: '❌',
-  warn: '⚠️',
-  info: 'ℹ️',
-  ticket: '🎫',
+  success: '<a:VerifySecu:1533785371983351808>',
+  error: '<a:error:1533785725542076577>',
+  warn: '<a:Warning:1533786003695734794>',
+  info: '<:Info:1533786220486983754>',
+  ticket: '<:ticket:1533786391576838194>',
   close: '🔒',
   purge: '🧹',
   rules: '📜',
   tos: '📧',
-  welcome: '✨',
-  mod: '🛡️',
+  welcome: '<:welcome:1533787702389117070>',
+  mod: '<:discord_moderator:1533787574882140193>',
   logs: '📝',
   categories: '📂',
-  help: '🆘'
+  help: '<:Discord_Helper:1191360487963775038>'
 };
 
 const BOT_COLORS = {
@@ -54,6 +56,10 @@ const BOT_COLORS = {
   info: '#C9C9FF'
 };
 
+const LEVEL_CHANNEL_ID = process.env.LEVEL_CHANNEL_ID || '1533511740183019550';
+const LEVEL_IMAGE_NAME = 'lvl.png';
+const XP_PER_MESSAGE = 8;
+
 const guildId = process.env.GUILD_ID || null;
 const welcomeChannelId = process.env.WELCOME_CHANNEL_ID || '1533505331177590814';
 const logsChannelId = process.env.LOGS_CHANNEL_ID || '1533505620836220998';
@@ -62,6 +68,7 @@ const ticketPanelChannelId = process.env.TICKET_PANEL_CHANNEL_ID || null;
 const dataDir = path.join(__dirname, 'data');
 const warningsFile = path.join(dataDir, 'warnings.json');
 const ticketPanelFile = path.join(dataDir, 'ticket-panel.json');
+const levelsFile = path.join(dataDir, 'levels.json');
 
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
@@ -75,12 +82,39 @@ if (!fs.existsSync(ticketPanelFile)) {
   fs.writeFileSync(ticketPanelFile, JSON.stringify({}, null, 2));
 }
 
+if (!fs.existsSync(levelsFile)) {
+  fs.writeFileSync(levelsFile, JSON.stringify({}, null, 2));
+}
+
 const TICKET_CATEGORIES = [
   { emoji: '💰', value: 'aide-economie', label: 'Aide économie' },
   { emoji: '🛠️', value: 'aide', label: 'Aide' },
   { emoji: '🎁', value: 'giveaway', label: 'Giveaway' },
   { emoji: '📌', value: 'claim', label: 'Claim' }
 ];
+
+const TICKET_REPLIES = {
+  'aide-economie': [
+    'Je prépare un ticket économique, tiens-toi prêt !',
+    'Analyse en cours… Ton ticket économie arrive dans quelques secondes.',
+    'Hop, création du ticket pour ton besoin d’économie !'
+  ],
+  'aide': [
+    'Je viens en aide ! Je crée ton ticket immédiatement.',
+    'Ouverture du ticket d’assistance en cours, reste connecté.',
+    'C’est parti, ton support arrive.'
+  ],
+  'giveaway': [
+    'Préparation du ticket de giveaway… bonne chance !',
+    'Un ticket giveaway est en route pour toi.',
+    'Je lance ton ticket giveaway, reste prêt.'
+  ],
+  'claim': [
+    'Ticket claim créé, on vérifie ta demande.',
+    'J’ouvre ton ticket claim maintenant.',
+    'Seulement quelques secondes avant l’ouverture de ton ticket claim.'
+  ]
+};
 
 function isAdmin(userId) {
   return adminIds.includes(userId);
@@ -110,8 +144,68 @@ function saveTicketPanels(data) {
   fs.writeFileSync(ticketPanelFile, JSON.stringify(data, null, 2));
 }
 
+function loadLevels() {
+  try {
+    return JSON.parse(fs.readFileSync(levelsFile, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function saveLevels(data) {
+  fs.writeFileSync(levelsFile, JSON.stringify(data, null, 2));
+}
+
 function getUserWarnings(guildWarnings, userId) {
   return guildWarnings[userId] || [];
+}
+
+function xpToNextLevel(level) {
+  return 50 + level * 25;
+}
+
+async function sendLevelUpMessage(guild, user, level) {
+  const channel = guild.channels.cache.get(LEVEL_CHANNEL_ID) || await guild.channels.fetch(LEVEL_CHANNEL_ID).catch(() => null);
+  if (!channel || !channel.isTextBased()) return;
+
+  const attachment = new AttachmentBuilder(path.join(__dirname, 'assets', LEVEL_IMAGE_NAME)).setName(LEVEL_IMAGE_NAME);
+  const embed = new EmbedBuilder()
+    .setColor(BOT_COLORS.success)
+    .setTitle(`${EMOJIS.success} Niveau supérieur !`)
+    .setDescription(`Bravo **${user.tag}** ! Tu viens de passer niveau **${level}**.`)
+    .setThumbnail(user.displayAvatarURL({ dynamic: true, size: 256 }))
+    .addFields(
+      { name: 'XP gagnée', value: `+${XP_PER_MESSAGE} XP`, inline: true },
+      { name: 'Nouveau niveau', value: `Niveau ${level}`, inline: true }
+    )
+    .setFooter({ text: 'Elysium • Progression' })
+    .setImage(`attachment://${LEVEL_IMAGE_NAME}`)
+    .setTimestamp();
+
+  await channel.send({ embeds: [embed], files: [attachment] });
+}
+
+async function processLevel(message) {
+  if (!message.guild || message.author.bot) return;
+
+  const levels = loadLevels();
+  if (!levels[message.guild.id]) {
+    levels[message.guild.id] = {};
+  }
+
+  const userId = message.author.id;
+  const userData = levels[message.guild.id][userId] || { xp: 0, level: 1 };
+  userData.xp += XP_PER_MESSAGE;
+
+  const target = xpToNextLevel(userData.level);
+  if (userData.xp >= target) {
+    userData.xp -= target;
+    userData.level += 1;
+    await sendLevelUpMessage(message.guild, message.author, userData.level);
+  }
+
+  levels[message.guild.id][userId] = userData;
+  saveLevels(levels);
 }
 
 function addWarning(guildIdValue, userId, moderatorId, reason) {
@@ -280,12 +374,22 @@ client.once('ready', async () => {
       const embed = new EmbedBuilder()
         .setColor(BOT_COLORS.default)
         .setTitle(`${EMOJIS.categories} Panel de tickets`)
-        .setDescription('Choisis une catégorie dans la liste ci-dessous pour créer ton ticket.')
+        .setDescription('Choisis une option ci-dessous pour créer ton ticket. Les admins seront alertés automatiquement.')
         .setFooter({ text: 'Elysium • Ticket System' })
-        .setTimestamp()
-        .addFields(...TICKET_CATEGORIES.map((item) => ({ name: `${item.emoji}  ${item.label}`, value: item.value, inline: true })));
+        .setTimestamp();
 
-      const sent = await panelChannel.send({ embeds: [embed] });
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId('ticket_select')
+        .setPlaceholder('Sélectionne le type de ticket...')
+        .addOptions(TICKET_CATEGORIES.map((item) => ({
+          label: item.label,
+          value: item.value,
+          description: item.label,
+          emoji: item.emoji
+        })));
+
+      const row = new ActionRowBuilder().addComponents(menu);
+      const sent = await panelChannel.send({ embeds: [embed], components: [row] });
 
       panels[guild.id] = sent.id;
       saveTicketPanels(panels);
@@ -326,9 +430,31 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
   });
 });
 
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isStringSelectMenu() || interaction.customId !== 'ticket_select') return;
+
+  const ticketType = interaction.values[0];
+  const item = TICKET_CATEGORIES.find((cat) => cat.value === ticketType);
+  if (!item) {
+    await interaction.reply({ content: 'Impossible de trouver cette catégorie.', ephemeral: true });
+    return;
+  }
+
+  const replies = TICKET_REPLIES[item.value] || ['Je prépare ton ticket…'];
+  const response = replies[Math.floor(Math.random() * replies.length)];
+  await interaction.reply({ content: `*${response}*`, ephemeral: true });
+
+  const member = interaction.member?.user || interaction.user;
+  const channel = await createTicketChannel(interaction.guild, member, item.label);
+  await interaction.followUp({ content: `Ton ticket a été ouvert : ${channel}`, ephemeral: true });
+});
+
 client.on('messageCreate', async (message) => {
-  if (!message.content.startsWith(prefix) || message.author.bot) return;
-  if (!message.guild) return;
+  if (!message.guild || message.author.bot) return;
+
+  await processLevel(message);
+
+  if (!message.content.startsWith(prefix)) return;
 
   const args = message.content.slice(prefix.length).trim().split(/\s+/);
   const command = args.shift()?.toLowerCase();
@@ -337,20 +463,26 @@ client.on('messageCreate', async (message) => {
 
   if (command === 'help') {
     const embed = new EmbedBuilder()
-      .setColor('#5B6CFF')
-      .setTitle('Commandes du bot')
+      .setColor(BOT_COLORS.default)
+      .setTitle(`${EMOJIS.help} Commandes du bot`)
       .setDescription('Préfixe utilisé : `+`')
       .addFields(
         { name: '+warn @user raison', value: 'Ajoute un warn à un utilisateur.' },
         { name: '+warnings @user', value: 'Affiche tous les warns d’un utilisateur.' },
         { name: '+ban @user raison', value: 'Bannit un utilisateur.' },
         { name: '+kick @user raison', value: 'Expulse un utilisateur.' },
-        { name: '+purge', value: 'Supprime tous les messages du salon et envoie un résumé en MP.' },
+        { name: '+mute @member durée raison', value: 'Mute un membre (si ajouté plus tard).' },
+        { name: '+unmute @member', value: 'Démute un membre (si ajouté plus tard).' },
+        { name: '+purge <1-100>', value: 'Supprime les messages du salon et envoie un résumé en MP.' },
         { name: '+rules', value: 'Affiche le règlement du serveur.' },
         { name: '+tos', value: 'Affiche les réseaux sociaux du serveur.' },
-        { name: '+ticket <type>', value: 'Ouvre un ticket pour aide, giveaway, claim, aide-economie.' },
-        { name: '+setup-ticket-panel', value: 'Affiche de nouveau le panneau de catégories.' }
-      );
+        { name: '+ticket <type>', value: 'Ouvre un ticket pour aide, giveaway, claim, aide-économie.' },
+        { name: '+setup-ticket-panel', value: 'Affiche de nouveau le panneau de tickets.' },
+        { name: '+test image', value: 'Envoie toutes les images du bot.' },
+        { name: '+test emoji', value: 'Affiche tous les emojis utilisés par le bot.' }
+      )
+      .setFooter({ text: 'Elysium • Bot de modération' })
+      .setTimestamp();
     await message.channel.send({ embeds: [embed] });
     return;
   }
@@ -522,10 +654,9 @@ client.on('messageCreate', async (message) => {
     const embed = new EmbedBuilder()
       .setColor(BOT_COLORS.default)
       .setTitle(`${EMOJIS.categories} Panel de tickets`)
-      .setDescription('Choisis une catégorie ci-dessous pour ouvrir un ticket.')
+      .setDescription('Pour ouvrir un ticket, utilise la commande : `+ticket <type>`\nExemple : `+ticket aide`\nSi tu veux un ticket pour un giveaway ou un claim, utilise `+ticket giveaway` ou `+ticket claim`.')
       .setFooter({ text: 'Elysium • Ticket System' })
-      .setTimestamp()
-      .addFields(...TICKET_CATEGORIES.map((item) => ({ name: `${item.emoji} ${item.label}`, value: item.value, inline: true })));
+      .setTimestamp();
 
     const sent = await panelChannel.send({ embeds: [embed] });
 
@@ -543,6 +674,28 @@ client.on('messageCreate', async (message) => {
     const member = await message.guild.members.fetch(message.author.id);
     const channel = await createTicketChannel(message.guild, member.user, value);
     await message.reply(`Ton ticket a été créé dans ${channel}.`);
+    return;
+  }
+
+  if (command === 'test' && args[0] === 'image') {
+    const attachments = [
+      new AttachmentBuilder(path.join(__dirname, 'assets', 'bienvenue.png')).setName('bienvenue.png'),
+      new AttachmentBuilder(path.join(__dirname, 'assets', 'regles.png')).setName('regles.png'),
+      new AttachmentBuilder(path.join(__dirname, 'assets', 'lvl.png')).setName('lvl.png')
+    ];
+    await message.channel.send({ content: 'Voici toutes les images du bot :', files: attachments });
+    return;
+  }
+
+  if (command === 'test' && args[0] === 'emoji') {
+    const emojiList = Object.entries(EMOJIS).map(([key, value]) => `**${key}** : ${value}`).join('\n');
+    const embed = new EmbedBuilder()
+      .setColor(BOT_COLORS.info)
+      .setTitle(`${EMOJIS.info} Emojis du bot`)
+      .setDescription(emojiList)
+      .setFooter({ text: 'Elysium • Emoji list' })
+      .setTimestamp();
+    await message.channel.send({ embeds: [embed] });
     return;
   }
 

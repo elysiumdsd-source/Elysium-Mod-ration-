@@ -50,7 +50,7 @@ if (!fs.existsSync(ticketPanelFile)) {
   fs.writeFileSync(ticketPanelFile, JSON.stringify({}, null, 2));
 }
 
-const ticketEmojiMap = [
+const ticketCategories = [
   { emoji: '💰', value: 'aide-economie', label: 'Aide économie' },
   { emoji: '🛠️', value: 'aide', label: 'Aide' },
   { emoji: '🎁', value: 'giveaway', label: 'Giveaway' },
@@ -254,13 +254,10 @@ client.once('ready', async () => {
       const embed = new EmbedBuilder()
         .setColor('#5B6CFF')
         .setTitle('Panel de tickets')
-        .setDescription('Réagis avec l’émoticône correspondant à ton besoin pour ouvrir un ticket.')
-        .addFields(...ticketEmojiMap.map((item) => ({ name: `${item.emoji} ${item.label}`, value: item.value, inline: true })));
+        .setDescription('Choisis une catégorie ci-dessous pour ouvrir un ticket.')
+        .addFields(...ticketCategories.map((item) => ({ name: `${item.emoji} ${item.label}`, value: item.value, inline: true })));
 
       const sent = await panelChannel.send({ embeds: [embed] });
-      for (const item of ticketEmojiMap) {
-        await sent.react(item.emoji);
-      }
 
       panels[guild.id] = sent.id;
       saveTicketPanels(panels);
@@ -309,28 +306,6 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
   });
 });
 
-client.on('messageReactionAdd', async (reaction, user) => {
-  if (user.bot) return;
-  const panels = loadTicketPanels();
-  const guildIdValue = reaction.message.guildId;
-  const panelMessageId = panels[guildIdValue];
-
-  if (!panelMessageId || reaction.message.id !== panelMessageId) return;
-
-  const item = ticketEmojiMap.find((entry) => entry.emoji === reaction.emoji.name || entry.emoji === reaction.emoji.toString());
-  if (!item) return;
-
-  try {
-    const guild = reaction.message.guild;
-    const member = await guild.members.fetch(user.id);
-    const channel = await createTicketChannel(guild, member.user, item.label);
-    await reaction.users.remove(user.id);
-    await channel.send({ content: `Ticket ouvert pour ${member.user}.` });
-  } catch (error) {
-    console.error(error);
-  }
-});
-
 client.on('messageCreate', async (message) => {
   if (!message.content.startsWith(prefix) || message.author.bot) return;
   if (!message.guild) return;
@@ -353,7 +328,8 @@ client.on('messageCreate', async (message) => {
         { name: '+purge', value: 'Supprime tous les messages du salon et envoie un résumé en MP.' },
         { name: '+rules', value: 'Affiche le règlement du serveur.' },
         { name: '+tos', value: 'Affiche les réseaux sociaux du serveur.' },
-        { name: '+ticket <type>', value: 'Ouvre un ticket pour aide, giveaway, claim, aide-economie.' }
+        { name: '+ticket <type>', value: 'Ouvre un ticket pour aide, giveaway, claim, aide-economie.' },
+        { name: '+setup-ticket-panel', value: 'Affiche de nouveau le panneau de catégories.' }
       );
     await message.channel.send({ embeds: [embed] });
     return;
@@ -524,13 +500,10 @@ client.on('messageCreate', async (message) => {
     const embed = new EmbedBuilder()
       .setColor('#5B6CFF')
       .setTitle('Panel de tickets')
-      .setDescription('Réagis avec l’émoticône correspondant à ton besoin pour ouvrir un ticket.')
-      .addFields(...ticketEmojiMap.map((item) => ({ name: `${item.emoji} ${item.label}`, value: item.value, inline: true })));
+      .setDescription('Choisis une catégorie ci-dessous pour ouvrir un ticket.')
+      .addFields(...ticketCategories.map((item) => ({ name: `${item.emoji} ${item.label}`, value: item.value, inline: true })));
 
     const sent = await panelChannel.send({ embeds: [embed] });
-    for (const item of ticketEmojiMap) {
-      await sent.react(item.emoji);
-    }
 
     const panels = loadTicketPanels();
     panels[message.guild.id] = sent.id;
@@ -541,7 +514,7 @@ client.on('messageCreate', async (message) => {
 
   if (command === 'ticket') {
     const type = (args[0] || 'aide').toLowerCase();
-    const selected = ticketEmojiMap.find((item) => item.value === type || item.label.toLowerCase() === type);
+    const selected = ticketCategories.find((item) => item.value === type || item.label.toLowerCase() === type);
     const value = selected ? selected.label : 'Aide';
     const member = await message.guild.members.fetch(message.author.id);
     const channel = await createTicketChannel(message.guild, member.user, value);

@@ -522,7 +522,11 @@ async function createTicketChannel(guild, user, categoryValue) {
         id: adminId,
         allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory]
       }))
-    ]
+    ].map((overwrite) => ({
+      ...overwrite,
+      id: overwrite.id,
+      type: overwrite.id === guild.roles.everyone.id ? 0 : 1
+    }))
   });
 
   const embed = new EmbedBuilder()
@@ -650,7 +654,7 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.isButton() && interaction.customId === 'claim_ticket') {
     const member = interaction.member;
     if (!member || (!isAdmin(member.user.id) && !hasStaffRole(member))) {
-      await interaction.reply({ content: 'Seuls les admins/staff peuvent claim ce ticket.', ephemeral: true });
+      await interaction.reply({ content: 'Seuls les admins/staff peuvent claim ce ticket.', flags: ['Ephemeral'] });
       return;
     }
 
@@ -664,7 +668,7 @@ client.on('interactionCreate', async (interaction) => {
 
     await interaction.message.edit({ components: [claimRow] });
     appendTicketTranscript(interaction.channel, `[${new Date().toISOString()}] SYSTEM: Ticket claimé par ${member.user.tag}`);
-    await interaction.reply({ content: `Ticket claimé par ${member.user}.`, ephemeral: true });
+    await interaction.reply({ content: `Ticket claimé par ${member.user}.`, flags: ['Ephemeral'] });
     await interaction.channel.send({ content: `${member.user} a claimé ce ticket.` });
     return;
   }
@@ -674,17 +678,17 @@ client.on('interactionCreate', async (interaction) => {
   const ticketType = interaction.values[0];
   const item = TICKET_CATEGORIES.find((cat) => cat.value === ticketType);
   if (!item) {
-    await interaction.reply({ content: 'Impossible de trouver cette catégorie.', ephemeral: true });
+    await interaction.reply({ content: 'Impossible de trouver cette catégorie.', flags: ['Ephemeral'] });
     return;
   }
 
   const replies = TICKET_REPLIES[item.value] || ['Je prépare ton ticket…'];
   const response = replies[Math.floor(Math.random() * replies.length)];
-  await interaction.reply({ content: `*${response}*`, ephemeral: true });
+  await interaction.reply({ content: `*${response}*`, flags: ['Ephemeral'] });
 
   const member = interaction.member?.user || interaction.user;
   const channel = await createTicketChannel(interaction.guild, member, item.label);
-  await interaction.followUp({ content: `Ton ticket a été ouvert : ${channel}`, ephemeral: true });
+  await interaction.followUp({ content: `Ton ticket a été ouvert : ${channel}`, flags: ['Ephemeral'] });
 });
 
 client.on('messageCreate', async (message) => {

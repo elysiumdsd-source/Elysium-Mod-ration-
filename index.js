@@ -245,14 +245,25 @@ async function sendLevelUpMessage(guild, user, level) {
 }
 
 async function initMongo() {
-  if (!MONGO_URI) return;
+  if (!MONGO_URI) {
+    console.warn('⚠️  MONGO_URI non configurée. Les données de niveau seront en mémoire uniquement.');
+    return;
+  }
   if (mongoClient) return;
 
-  mongoClient = new MongoClient(MONGO_URI);
-  await mongoClient.connect();
-  const db = mongoClient.db(DB_NAME);
-  levelsCollection = db.collection(LEVELS_COLLECTION);
-  await levelsCollection.createIndex({ guildId: 1, userId: 1 }, { unique: true });
+  try {
+    console.log('🔗 Tentative de connexion à MongoDB...');
+    mongoClient = new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: 5000 });
+    await mongoClient.connect();
+    const db = mongoClient.db(DB_NAME);
+    levelsCollection = db.collection(LEVELS_COLLECTION);
+    await levelsCollection.createIndex({ guildId: 1, userId: 1 }, { unique: true });
+    console.log('✅ MongoDB connecté avec succès !');
+  } catch (error) {
+    console.error('❌ Erreur de connexion MongoDB:', error.message);
+    mongoClient = null;
+    levelsCollection = null;
+  }
 }
 
 async function getUserLevelData(guildId, userId) {
@@ -260,8 +271,13 @@ async function getUserLevelData(guildId, userId) {
     return { xp: 0, level: 1 };
   }
 
-  const record = await levelsCollection.findOne({ guildId, userId });
-  return record || { xp: 0, level: 1 };
+  try {
+    const record = await levelsCollection.findOne({ guildId, userId });
+    return record || { xp: 0, level: 1 };
+  } catch (error) {
+    console.error('❌ Erreur lors de la lecture des données de niveau:', error.message);
+    return { xp: 0, level: 1 };
+  }
 }
 
 async function saveUserLevelData(guildId, userId, data) {
@@ -269,11 +285,15 @@ async function saveUserLevelData(guildId, userId, data) {
     return;
   }
 
-  await levelsCollection.updateOne(
-    { guildId, userId },
-    { $set: { guildId, userId, ...data } },
-    { upsert: true }
-  );
+  try {
+    await levelsCollection.updateOne(
+      { guildId, userId },
+      { $set: { guildId, userId, ...data } },
+      { upsert: true }
+    );
+  } catch (error) {
+    console.error('❌ Erreur lors de la sauvegarde des données de niveau:', error.message);
+  }
 }
 
 function createProgressBar(current, max, size = 10) {
@@ -884,6 +904,36 @@ client.on('messageCreate', async (message) => {
     }));
 
     const embed = infoEmbed('🏆 Classement des membres les plus actifs', leaderboardText.join('\n'));
+    await message.channel.send({ embeds: [embed] });
+    return;
+  }
+
+  if (command === 'addlevel') {
+    if (!isAdmin(message.author.id)) {
+      await message.reply('Seules les personnes autorisées peuvent utiliser cette commande.');
+      return;
+    }
+
+    const target = message.mentions.members?.first() || (args[0] ? await message.guild.members.fetch(args[0]).catch(() => null) : null);
+    if (!target) {
+      await message.reply('Veuillez mentionner un utilisateur valide.');
+      return;
+    }
+
+    const levelsToAdd = Number.parseInt(args[1], 10);
+    if (Number.isNaN(levelsToAdd) || levelsToAdd < 1) {
+      await message.reply('Veuillez fournir un nombre de niveaux valide (minimum 1).');
+      return;
+    }
+
+    await initMongo();
+    const userData = await getUserLevelData(message.guild.id, target.id);
+    userData.level = (userData.level || 1) + levelsToAdd;
+    await saveUserLevelData(message.guild.id, target.id, userData);
+
+    const embed = successEmbed(`${EMOJIS.success} Niveaux ajoutés`, `${target} a reçu **+${levelsToAdd}** niveau(x) !\n\n**Nouveau niveau :** ${userData.level}`)
+      .setThumbnail(target.displayAvatarURL({ dynamic: true }));
+
     await message.channel.send({ embeds: [embed] });
     return;
   }

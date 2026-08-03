@@ -29,6 +29,31 @@ const adminIds = (process.env.ADMIN_IDS || '1497279403619647648,8274921507605708
   .map((id) => id.trim())
   .filter(Boolean);
 
+const EMOJIS = {
+  success: '✅',
+  error: '❌',
+  warn: '⚠️',
+  info: 'ℹ️',
+  ticket: '🎫',
+  close: '🔒',
+  purge: '🧹',
+  rules: '📜',
+  tos: '📧',
+  welcome: '✨',
+  mod: '🛡️',
+  logs: '📝',
+  categories: '📂',
+  help: '🆘'
+};
+
+const BOT_COLORS = {
+  default: '#5B6CFF',
+  success: '#3BA55D',
+  warn: '#F3C53D',
+  error: '#FF4D4D',
+  info: '#C9C9FF'
+};
+
 const guildId = process.env.GUILD_ID || null;
 const welcomeChannelId = process.env.WELCOME_CHANNEL_ID || '1533505331177590814';
 const logsChannelId = process.env.LOGS_CHANNEL_ID || '1533505620836220998';
@@ -50,7 +75,7 @@ if (!fs.existsSync(ticketPanelFile)) {
   fs.writeFileSync(ticketPanelFile, JSON.stringify({}, null, 2));
 }
 
-const ticketCategories = [
+const TICKET_CATEGORIES = [
   { emoji: '💰', value: 'aide-economie', label: 'Aide économie' },
   { emoji: '🛠️', value: 'aide', label: 'Aide' },
   { emoji: '🎁', value: 'giveaway', label: 'Giveaway' },
@@ -219,11 +244,12 @@ async function createTicketChannel(guild, user, categoryValue) {
   });
 
   const embed = new EmbedBuilder()
-    .setColor('#5B6CFF')
-    .setTitle('Ticket ouvert')
-    .setDescription(`Bonjour ${user}, votre ticket a bien été créé pour la demande : **${categoryValue}**.`)
-    .addFields({ name: 'Commande de fermeture', value: 'Utilisez `+close` pour fermer ce ticket.' });
-
+      .setColor(BOT_COLORS.default)
+      .setTitle(`${EMOJIS.ticket} Ticket ouvert`)
+      .setDescription(`Bonjour ${user}, votre ticket a bien été créé pour la demande : **${categoryValue}**.`)
+      .addFields({ name: 'Fermeture', value: 'Utilisez `+close` pour fermer ce ticket.', inline: false })
+      .setFooter({ text: 'Elysium • Support Ticket' })
+      .setTimestamp();
   await channel.send({ content: `<@${user.id}>`, embeds: [embed] });
   return channel;
 }
@@ -252,10 +278,12 @@ client.once('ready', async () => {
       }
 
       const embed = new EmbedBuilder()
-        .setColor('#5B6CFF')
-        .setTitle('Panel de tickets')
-        .setDescription('Choisis une catégorie ci-dessous pour ouvrir un ticket.')
-        .addFields(...ticketCategories.map((item) => ({ name: `${item.emoji} ${item.label}`, value: item.value, inline: true })));
+        .setColor(BOT_COLORS.default)
+        .setTitle(`${EMOJIS.categories} Panel de tickets`)
+        .setDescription('Choisis une catégorie dans la liste ci-dessous pour créer ton ticket.')
+        .setFooter({ text: 'Elysium • Ticket System' })
+        .setTimestamp()
+        .addFields(...TICKET_CATEGORIES.map((item) => ({ name: `${item.emoji}  ${item.label}`, value: item.value, inline: true })));
 
       const sent = await panelChannel.send({ embeds: [embed] });
 
@@ -273,23 +301,15 @@ client.on('guildMemberAdd', async (member) => {
 
   const attachment = new AttachmentBuilder(path.join(__dirname, 'assets', 'bienvenue.png')).setName('bienvenue.png');
   const embed = new EmbedBuilder()
-    .setColor('#5B6CFF')
-    .setTitle('Bienvenue sur Elysium')
-    .setDescription(`Bienvenue ${member} sur Elysium ! Nous sommes heureux de te compter parmi nous.`)
-    .setImage('attachment://bienvenue.png');
+    .setColor(BOT_COLORS.success)
+    .setTitle(`${EMOJIS.welcome} Bienvenue sur Elysium`)
+    .setDescription(`Salut ${member}, bienvenue dans la famille Elysium ! Nous sommes ravis de te voir ici.`)
+    .setThumbnail(member.displayAvatarURL({ dynamic: true }))
+    .setImage('attachment://bienvenue.png')
+    .setFooter({ text: 'Elysium • Bienvenue' })
+    .setTimestamp();
 
   await channel.send({ content: `<@${member.id}>`, embeds: [embed], files: [attachment] });
-});
-
-client.on('messageDelete', async (message) => {
-  if (!message.guild || message.author?.bot) return;
-  await sendLog(message.guild, 'delete', {
-    description: `Le contenu suivant a été supprimé dans ${message.channel}.`,
-    author: message.author.tag,
-    channel: `#${message.channel.name}`,
-    time: formatTimestamp(new Date()),
-    before: message.content || 'Pas de contenu textuel'
-  });
 });
 
 client.on('messageUpdate', async (oldMessage, newMessage) => {
@@ -374,9 +394,11 @@ client.on('messageCreate', async (message) => {
 
     const warnings = loadWarnings()[message.guild.id]?.[target.id] || [];
     const embed = new EmbedBuilder()
-      .setColor('#5B6CFF')
-      .setTitle(`Warns de ${target.user.tag}`)
-      .setDescription(warnings.length ? 'Liste des anciens warns :' : 'Aucun warn enregistré.');
+      .setColor(BOT_COLORS.info)
+      .setTitle(`${EMOJIS.warn} Warns de ${target.user.tag}`)
+      .setDescription(warnings.length ? 'Voici les warns enregistrés :' : 'Aucun warn enregistré.')
+      .setFooter({ text: 'Historique des sanctions' })
+      .setTimestamp();
 
     if (warnings.length) {
       warnings.forEach((warning, index) => {
@@ -498,10 +520,12 @@ client.on('messageCreate', async (message) => {
 
     const panelChannel = message.channel;
     const embed = new EmbedBuilder()
-      .setColor('#5B6CFF')
-      .setTitle('Panel de tickets')
+      .setColor(BOT_COLORS.default)
+      .setTitle(`${EMOJIS.categories} Panel de tickets`)
       .setDescription('Choisis une catégorie ci-dessous pour ouvrir un ticket.')
-      .addFields(...ticketCategories.map((item) => ({ name: `${item.emoji} ${item.label}`, value: item.value, inline: true })));
+      .setFooter({ text: 'Elysium • Ticket System' })
+      .setTimestamp()
+      .addFields(...TICKET_CATEGORIES.map((item) => ({ name: `${item.emoji} ${item.label}`, value: item.value, inline: true })));
 
     const sent = await panelChannel.send({ embeds: [embed] });
 
@@ -514,7 +538,7 @@ client.on('messageCreate', async (message) => {
 
   if (command === 'ticket') {
     const type = (args[0] || 'aide').toLowerCase();
-    const selected = ticketCategories.find((item) => item.value === type || item.label.toLowerCase() === type);
+    const selected = TICKET_CATEGORIES.find((item) => item.value === type || item.label.toLowerCase() === type);
     const value = selected ? selected.label : 'Aide';
     const member = await message.guild.members.fetch(message.author.id);
     const channel = await createTicketChannel(message.guild, member.user, value);
@@ -539,14 +563,16 @@ client.on('messageCreate', async (message) => {
     }
 
     const embed = new EmbedBuilder()
-      .setColor('#5B6CFF')
-      .setTitle('Conditions générales')
+      .setColor(BOT_COLORS.info)
+      .setTitle(`${EMOJIS.tos} Conditions générales`)
       .setDescription('Voici nos coordonnées et réseaux sociaux.')
       .addFields(
         { name: 'TikTok', value: '@Elysium.Zen.Ashu', inline: true },
         { name: 'Instagram', value: '@Elysium.Zen.Ashu', inline: true },
         { name: 'Gmail', value: 'Elysium.dsd@gmail.com', inline: true }
-      );
+      )
+      .setFooter({ text: 'Elysium • Contact' })
+      .setTimestamp();
 
     await message.channel.send({ embeds: [embed] });
     return;

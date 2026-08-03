@@ -90,7 +90,8 @@ function errorEmbed(title, description) {
 
 const LEVEL_CHANNEL_ID = process.env.LEVEL_CHANNEL_ID || '1533511740183019550';
 const LEVEL_IMAGE_NAME = 'lvl.png';
-const XP_PER_MESSAGE = 5;
+const XP_MIN_PER_MESSAGE = 5;
+const XP_MAX_PER_MESSAGE = 9;
 const SPAM_THRESHOLD = 5;
 const SPAM_WINDOW = 10_000; // 10 secondes
 const SPAM_MUTE_DURATION = 60_000; // 1 minute
@@ -223,7 +224,11 @@ function xpToNextLevel(level) {
   return 50 + level * 25;
 }
 
-async function sendLevelUpMessage(guild, user, level) {
+function getXpGainForMessage() {
+  return Math.floor(Math.random() * (XP_MAX_PER_MESSAGE - XP_MIN_PER_MESSAGE + 1)) + XP_MIN_PER_MESSAGE;
+}
+
+async function sendLevelUpMessage(guild, user, level, xpGained) {
   const channel = guild.channels.cache.get(LEVEL_CHANNEL_ID) || await guild.channels.fetch(LEVEL_CHANNEL_ID).catch(() => null);
   if (!channel || !channel.isTextBased()) return;
 
@@ -234,7 +239,7 @@ async function sendLevelUpMessage(guild, user, level) {
     .setDescription(`Bravo **${user.tag}** ! Tu viens de passer niveau **${level}**.`)
     .setThumbnail(user.displayAvatarURL({ dynamic: true, size: 256 }))
     .addFields(
-      { name: 'XP gagnée', value: `+${XP_PER_MESSAGE} XP`, inline: true },
+      { name: 'XP gagnée', value: `+${xpGained} XP`, inline: true },
       { name: 'Nouveau niveau', value: `Niveau ${level}`, inline: true }
     )
     .setFooter({ text: 'Elysium • Progression' })
@@ -311,14 +316,15 @@ async function processLevel(message) {
   const userId = message.author.id;
   const guildId = message.guild.id;
   const userData = await getUserLevelData(guildId, userId);
+  const xpGained = getXpGainForMessage();
 
-  userData.xp = (userData.xp || 0) + XP_PER_MESSAGE;
+  userData.xp = (userData.xp || 0) + xpGained;
 
   const target = xpToNextLevel(userData.level || 1);
   if (userData.xp >= target) {
     userData.xp -= target;
     userData.level = (userData.level || 1) + 1;
-    await sendLevelUpMessage(message.guild, message.author, userData.level);
+    await sendLevelUpMessage(message.guild, message.author, userData.level, xpGained);
 
     const roleName = LEVEL_ROLES[userData.level];
     if (roleName) {

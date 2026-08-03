@@ -1,7 +1,7 @@
-require('dotenv').config({ path: path.join(__dirname, '.env') });
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const { MongoClient } = require('mongodb');
 const {
   loadLevelsFromFile,
@@ -136,6 +136,7 @@ const dataDir = path.join(__dirname, 'data');
 const warningsFile = path.join(dataDir, 'warnings.json');
 const ticketPanelFile = path.join(dataDir, 'ticket-panel.json');
 const levelsFile = path.join(dataDir, 'levels.json');
+const transcriptDir = path.join(dataDir, 'transcripts');
 
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
@@ -151,6 +152,10 @@ if (!fs.existsSync(ticketPanelFile)) {
 
 if (!fs.existsSync(levelsFile)) {
   fs.writeFileSync(levelsFile, JSON.stringify({}, null, 2));
+}
+
+if (!fs.existsSync(transcriptDir)) {
+  fs.mkdirSync(transcriptDir, { recursive: true });
 }
 
 const TICKET_CATEGORIES = [
@@ -216,6 +221,35 @@ function loadTicketPanels() {
 
 function saveTicketPanels(data) {
   fs.writeFileSync(ticketPanelFile, JSON.stringify(data, null, 2));
+}
+
+function sanitizeTranscriptName(value) {
+  return String(value).replace(/[^a-z0-9._-]/gi, '_');
+}
+
+function getTicketTranscriptPath(channel) {
+  return path.join(transcriptDir, `${channel.id}-${sanitizeTranscriptName(channel.name)}.log`);
+}
+
+function appendTicketTranscript(channel, line) {
+  try {
+    fs.appendFileSync(getTicketTranscriptPath(channel), `${line}\n`);
+  } catch (error) {
+    console.error('❌ Erreur lors de l’écriture du transcript de ticket :', error.message);
+  }
+}
+
+function writeTicketTranscriptHeader(channel, user, categoryValue) {
+  const header = [
+    '=== Transcript de ticket ===',
+    `Salon: #${channel.name}`,
+    `Créé par: ${user?.tag || user?.username || 'inconnu'}`,
+    `Catégorie: ${categoryValue}`,
+    `Date: ${new Date().toISOString()}`,
+    ''
+  ];
+
+  fs.writeFileSync(getTicketTranscriptPath(channel), header.join('\n'));
 }
 
 function loadLevels() {
@@ -499,6 +533,8 @@ async function createTicketChannel(guild, user, categoryValue) {
       .setFooter({ text: 'Elysium • Support Ticket' })
       .setTimestamp();
 
+  writeTicketTranscriptHeader(channel, user, categoryValue);
+
   const claimButton = new ButtonBuilder()
     .setCustomId('claim_ticket')
     .setLabel('Claim')
@@ -627,6 +663,7 @@ client.on('interactionCreate', async (interaction) => {
     );
 
     await interaction.message.edit({ components: [claimRow] });
+    appendTicketTranscript(interaction.channel, `[${new Date().toISOString()}] SYSTEM: Ticket claimé par ${member.user.tag}`);
     await interaction.reply({ content: `Ticket claimé par ${member.user}.`, ephemeral: true });
     await interaction.channel.send({ content: `${member.user} a claimé ce ticket.` });
     return;
@@ -652,6 +689,11 @@ client.on('interactionCreate', async (interaction) => {
 
 client.on('messageCreate', async (message) => {
   if (!message.guild || message.author.bot) return;
+
+  if (message.channel.name.startsWith('ticket-') && !message.author.bot) {
+    const content = message.content?.trim() || (message.attachments.size ? `[pièce jointe: ${message.attachments.map((attachment) => attachment.name).join(', ')}]` : '[message vide]');
+    appendTicketTranscript(message.channel, `[${new Date().toISOString()}] ${message.author.tag}: ${content}`);
+  }
 
   if (message.channel.id === AUTO_DELETE_CHANNEL_ID) {
     const previous = lastMessageByChannel.get(message.channel.id);
@@ -1015,6 +1057,7 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
+    appendTicketTranscript(message.channel, `[${new Date().toISOString()}] SYSTEM: Ticket fermé par ${message.author.tag}`);
     await message.channel.delete();
     return;
   }

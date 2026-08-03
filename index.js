@@ -58,7 +58,7 @@ const BOT_COLORS = {
 
 const LEVEL_CHANNEL_ID = process.env.LEVEL_CHANNEL_ID || '1533511740183019550';
 const LEVEL_IMAGE_NAME = 'lvl.png';
-const XP_PER_MESSAGE = 8;
+const XP_PER_MESSAGE = 5;
 
 const guildId = process.env.GUILD_ID || null;
 const welcomeChannelId = process.env.WELCOME_CHANNEL_ID || '1533505331177590814';
@@ -678,12 +678,19 @@ client.on('messageCreate', async (message) => {
   }
 
   if (command === 'test' && args[0] === 'image') {
-    const attachments = [
-      new AttachmentBuilder(path.join(__dirname, 'assets', 'bienvenue.png')).setName('bienvenue.png'),
-      new AttachmentBuilder(path.join(__dirname, 'assets', 'regles.png')).setName('regles.png'),
-      new AttachmentBuilder(path.join(__dirname, 'assets', 'lvl.png')).setName('lvl.png')
-    ];
-    await message.channel.send({ content: 'Voici toutes les images du bot :', files: attachments });
+    const imageFiles = ['bienvenue.png', 'reglement.png', 'lvl.png'];
+    const embeds = imageFiles.map((fileName) => {
+      return new EmbedBuilder()
+        .setColor(BOT_COLORS.info)
+        .setTitle(`${EMOJIS.info} ${fileName}`)
+        .setDescription(`Voici **${fileName}** envoyée par le bot.`)
+        .setImage(`attachment://${fileName}`)
+        .setFooter({ text: 'Elysium • Images du bot' })
+        .setTimestamp();
+    });
+
+    const attachments = imageFiles.map((fileName) => new AttachmentBuilder(path.join(__dirname, 'assets', fileName)).setName(fileName));
+    await message.channel.send({ content: 'Voici toutes les images du bot :', embeds, files: attachments });
     return;
   }
 
@@ -737,7 +744,7 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
-    const attachment = new AttachmentBuilder(path.join(__dirname, 'assets', 'regles.png')).setName('regles.png');
+    const attachment = new AttachmentBuilder(path.join(__dirname, 'assets', 'reglement.png')).setName('reglement.png');
     const embed = new EmbedBuilder()
       .setColor('#5B6CFF')
       .setTitle('🌌 • Règlement d’Elysium')
@@ -752,7 +759,7 @@ client.on('messageCreate', async (message) => {
         { name: '💡 • Suggestions', value: 'Une idée pour améliorer Elysium ?\nN’hésitez pas à utiliser le salon <#1533505450690085036>.' },
         { name: '🌟 • L’esprit d’Elysium', value: 'Elysium est avant tout une communauté basée sur le respect, la bonne humeur et le partage.\nMerci de contribuer à faire d’Elysium un endroit agréable pour tous. 💙' }
       )
-      .setImage('attachment://regles.png');
+      .setImage('attachment://reglement.png');
 
     await message.channel.send({ embeds: [embed], files: [attachment] });
     return;

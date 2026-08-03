@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
@@ -101,8 +101,8 @@ const SPAM_THRESHOLD = 5;
 const SPAM_WINDOW = 10_000; // 10 secondes
 const SPAM_MUTE_DURATION = 60_000; // 1 minute
 const AUTO_DELETE_CHANNEL_ID = process.env.AUTO_DELETE_CHANNEL_ID || '1533505601773113456';
-const MONGO_URI = process.env.MONGO_URI || '';
-const DB_NAME = process.env.DB_NAME || 'elysium_bot';
+const MONGO_URI = (process.env.MONGO_URI || '').trim();
+const DB_NAME = (process.env.DB_NAME || 'elysium_bot').trim();
 const LEVELS_COLLECTION = 'levels';
 const spamRecords = new Map();
 const lastMessageByChannel = new Map();

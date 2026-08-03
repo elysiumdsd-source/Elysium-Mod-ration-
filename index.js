@@ -609,4 +609,4 @@ client.on('messageCreate', async (message) => {
   await message.reply(`Commande inconnue. Tapez +help pour voir la liste.`);
 });
 
-client.login(process.env.BOT_TOKEN);
+client.login(process.env.TOKEN || process.env.BOT_TOKEN);

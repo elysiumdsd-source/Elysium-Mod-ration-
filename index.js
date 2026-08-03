@@ -1,5 +1,6 @@
 require('dotenv').config();
 const fs = require('fs');
+const http = require('http');
 const path = require('path');
 const { MongoClient } = require('mongodb');
 const {
@@ -99,6 +100,22 @@ const DB_NAME = process.env.DB_NAME || 'elysium_bot';
 const LEVELS_COLLECTION = 'levels';
 const spamRecords = new Map();
 const lastMessageByChannel = new Map();
+const xpCooldowns = new Set();
+const COOLDOWN_TIME = 60_000;
+const LEVEL_ROLES = {
+  5: '🌱 Novice',
+  10: '🗨️ Habitué',
+  15: '⭐ Citoyen',
+  20: '⚔️ Aventurier',
+  30: '🛡️ Gardien',
+  40: '🔥 Vétéran',
+  50: '💎 Élite',
+  60: '👑 Champion',
+  70: '🌟 Héros',
+  80: '⚜️ Légende',
+  90: '🏛️ Mythique',
+  100: '🌌 Immortel'
+};
 let mongoClient = null;
 let levelsCollection = null;
 
@@ -259,8 +276,16 @@ async function saveUserLevelData(guildId, userId, data) {
   );
 }
 
+function createProgressBar(current, max, size = 10) {
+  const percentage = Math.min(Math.max(current / max, 0), 1);
+  const progress = Math.round(size * percentage);
+  const emptyProgress = size - progress;
+  return '█'.repeat(progress) + '░'.repeat(emptyProgress);
+}
+
 async function processLevel(message) {
   if (!message.guild || message.author.bot) return;
+  if (xpCooldowns.has(message.author.id)) return;
 
   await initMongo();
   const userId = message.author.id;
@@ -274,9 +299,25 @@ async function processLevel(message) {
     userData.xp -= target;
     userData.level = (userData.level || 1) + 1;
     await sendLevelUpMessage(message.guild, message.author, userData.level);
+
+    const roleName = LEVEL_ROLES[userData.level];
+    if (roleName) {
+      const member = await message.guild.members.fetch(userId).catch(() => null);
+      if (member) {
+        const role = message.guild.roles.cache.find((r) => r.name === roleName);
+        if (role) {
+          const allLevelRoleNames = Object.values(LEVEL_ROLES);
+          const rolesToRemove = member.roles.cache.filter((r) => allLevelRoleNames.includes(r.name));
+          await member.roles.remove(rolesToRemove).catch(() => null);
+          await member.roles.add(role).catch(() => null);
+        }
+      }
+    }
   }
 
   await saveUserLevelData(guildId, userId, userData);
+  xpCooldowns.add(message.author.id);
+  setTimeout(() => xpCooldowns.delete(message.author.id), COOLDOWN_TIME);
 }
 
 function addWarning(guildIdValue, userId, moderatorId, reason) {
@@ -786,12 +827,63 @@ client.on('messageCreate', async (message) => {
 
   if (command === 'test' && args[0] === 'emoji') {
     const emojiList = Object.entries(EMOJIS).map(([key, value]) => `**${key}** : ${value}`).join('\n');
-    const embed = new EmbedBuilder()
-      .setColor(BOT_COLORS.info)
-      .setTitle(`${EMOJIS.info} Emojis du bot`)
-      .setDescription(emojiList)
-      .setFooter({ text: 'Elysium • Emoji list' })
-      .setTimestamp();
+    const embed = infoEmbed(`${EMOJIS.info} Emojis du bot`, emojiList);
+    await message.channel.send({ embeds: [embed] });
+    return;
+  }
+
+  if (command === 'rank' || command === 'level') {
+    const target = message.mentions.members?.first()?.user || (args[0] ? (await client.users.fetch(args[0]).catch(() => null)) : message.author);
+    if (!target) {
+      await message.reply('Utilisateur introuvable.');
+      return;
+    }
+
+    await initMongo();
+    const userData = await getUserLevelData(message.guild.id, target.id);
+    const currentLevel = userData.level || 1;
+    const currentXP = userData.xp || 0;
+    const neededXP = xpToNextLevel(currentLevel);
+    const progressBar = createProgressBar(currentXP, neededXP);
+    const percent = Math.floor((currentXP / neededXP) * 100);
+
+    const embed = infoEmbed(`${EMOJIS.welcome} Niveau de ${target.username}`, 'Voici les statistiques de progression sur **Elysium** :')
+      .setThumbnail(target.displayAvatarURL({ dynamic: true, size: 256 }))
+      .addFields(
+        { name: 'Niveau', value: `**${currentLevel}**`, inline: true },
+        { name: 'XP Actuel', value: `**${currentXP}** / ${neededXP} XP`, inline: true },
+        { name: 'Progression', value: `\`[${progressBar}]\` **${percent}%**` }
+      );
+
+    await message.channel.send({ embeds: [embed] });
+    return;
+  }
+
+  if (command === 'leaderboard' || command === 'top') {
+    await initMongo();
+    if (!levelsCollection) {
+      await message.reply('Base de données indisponible.');
+      return;
+    }
+
+    const topUsers = await levelsCollection.find({ guildId: message.guild.id })
+      .sort({ level: -1, xp: -1 })
+      .limit(10)
+      .toArray();
+
+    if (topUsers.length === 0) {
+      await message.reply('Aucun classement disponible pour l\'instant.');
+      return;
+    }
+
+    const leaderboardText = await Promise.all(topUsers.map(async (entry, index) => {
+      const user = await client.users.fetch(entry.userId).catch(() => null);
+      const username = user ? user.username : 'Utilisateur inconnu';
+      const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : '🔹';
+      return `${medal} **#${index + 1}** | **${username}** — Niv. **${entry.level}** (${entry.xp} XP)`;
+    }));
+
+    const embed = infoEmbed('🏆 Classement des membres les plus actifs', leaderboardText.join('\n'));
     await message.channel.send({ embeds: [embed] });
     return;
   }
@@ -855,6 +947,22 @@ client.on('messageCreate', async (message) => {
   }
 
   await message.reply(`Commande inconnue. Tapez +help pour voir la liste.`);
+});
+
+const port = Number(process.env.PORT) || 3000;
+const healthServer = http.createServer((req, res) => {
+  if (req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', service: 'elysium-bot' }));
+    return;
+  }
+
+  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end('Elysium bot is running.');
+});
+
+healthServer.listen(port, () => {
+  console.log(`Health server listening on port ${port}`);
 });
 
 client.login(process.env.TOKEN || process.env.BOT_TOKEN);

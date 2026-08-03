@@ -505,28 +505,29 @@ async function createTicketChannel(guild, user, categoryValue) {
   const category = await ensureTicketCategory(guild);
   const safeName = `ticket-${user.username.toLowerCase().replace(/[^a-z0-9]/g, '-')}-${Date.now().toString().slice(-4)}`;
 
+  const permissionOverwrites = [
+    {
+      id: guild.roles.everyone.id,
+      type: 'role',
+      deny: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
+    },
+    {
+      id: user.id,
+      type: 'member',
+      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory]
+    },
+    ...adminIds.map((adminId) => ({
+      id: adminId,
+      type: 'member',
+      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory]
+    }))
+  ];
+
   const channel = await guild.channels.create({
     name: safeName,
     type: ChannelType.GuildText,
     parent: category.id,
-    permissionOverwrites: [
-      {
-        id: guild.roles.everyone.id,
-        deny: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
-      },
-      {
-        id: user.id,
-        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory]
-      },
-      ...adminIds.map((adminId) => ({
-        id: adminId,
-        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory]
-      }))
-    ].map((overwrite) => ({
-      ...overwrite,
-      id: overwrite.id,
-      type: overwrite.id === guild.roles.everyone.id ? 0 : 1
-    }))
+    permissionOverwrites
   });
 
   const embed = new EmbedBuilder()
@@ -682,9 +683,11 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+  await interaction.deferReply({ flags: ['Ephemeral'] });
+
   const replies = TICKET_REPLIES[item.value] || ['Je prépare ton ticket…'];
   const response = replies[Math.floor(Math.random() * replies.length)];
-  await interaction.reply({ content: `*${response}*`, flags: ['Ephemeral'] });
+  await interaction.editReply(`*${response}*`);
 
   const member = interaction.member?.user || interaction.user;
   const channel = await createTicketChannel(interaction.guild, member, item.label);

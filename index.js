@@ -62,7 +62,9 @@ const XP_PER_MESSAGE = 5;
 const SPAM_THRESHOLD = 5;
 const SPAM_WINDOW = 10_000; // 10 secondes
 const SPAM_MUTE_DURATION = 60_000; // 1 minute
+const AUTO_DELETE_CHANNEL_ID = process.env.AUTO_DELETE_CHANNEL_ID || '1533505601773113456';
 const spamRecords = new Map();
+const lastMessageByChannel = new Map();
 
 const guildId = process.env.GUILD_ID || null;
 const welcomeChannelId = process.env.WELCOME_CHANNEL_ID || '1533505331177590814';
@@ -455,6 +457,14 @@ client.on('interactionCreate', async (interaction) => {
 
 client.on('messageCreate', async (message) => {
   if (!message.guild || message.author.bot) return;
+
+  if (message.channel.id === AUTO_DELETE_CHANNEL_ID) {
+    const previous = lastMessageByChannel.get(message.channel.id);
+    if (previous && previous.id !== message.id) {
+      await previous.delete().catch(() => {});
+    }
+    lastMessageByChannel.set(message.channel.id, message);
+  }
 
   const member = await message.guild.members.fetch(message.author.id).catch(() => null);
   if (member && !member.permissions.has(PermissionFlagsBits.Administrator)) {

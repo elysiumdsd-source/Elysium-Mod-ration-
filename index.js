@@ -54,8 +54,38 @@ const BOT_COLORS = {
   success: '#3BA55D',
   warn: '#F3C53D',
   error: '#FF4D4D',
-  info: '#C9C9FF'
+  info: '#7A83FF',
+  background: '#1C1E25'
 };
+
+function buildEmbed({ title, description, color = BOT_COLORS.default, footer = 'Elysium • Bot', thumbnail, image }) {
+  const embed = new EmbedBuilder()
+    .setTitle(title)
+    .setDescription(description)
+    .setColor(color)
+    .setFooter({ text: footer })
+    .setTimestamp();
+
+  if (thumbnail) embed.setThumbnail(thumbnail);
+  if (image) embed.setImage(image);
+  return embed;
+}
+
+function infoEmbed(title, description) {
+  return buildEmbed({ title, description, color: BOT_COLORS.info, footer: 'Elysium • Info' });
+}
+
+function successEmbed(title, description) {
+  return buildEmbed({ title, description, color: BOT_COLORS.success, footer: 'Elysium • Succès' });
+}
+
+function warningEmbed(title, description) {
+  return buildEmbed({ title, description, color: BOT_COLORS.warn, footer: 'Elysium • Attention' });
+}
+
+function errorEmbed(title, description) {
+  return buildEmbed({ title, description, color: BOT_COLORS.error, footer: 'Elysium • Erreur' });
+}
 
 const LEVEL_CHANNEL_ID = process.env.LEVEL_CHANNEL_ID || '1533511740183019550';
 const LEVEL_IMAGE_NAME = 'lvl.png';
@@ -323,10 +353,12 @@ async function sendLog(guild, type, details) {
   const channel = guild.channels.cache.get(logsChannelId) || await guild.channels.fetch(logsChannelId).catch(() => null);
   if (!channel || !channel.isTextBased()) return;
 
-  const embed = new EmbedBuilder()
-    .setColor(type === 'delete' ? '#ff4d4d' : '#f3c53d')
-    .setTitle(type === 'delete' ? 'Message supprimé' : 'Message modifié')
-    .setDescription(details.description)
+  const embed = buildEmbed({
+    title: type === 'delete' ? 'Message supprimé' : 'Message modifié',
+    description: details.description,
+    color: type === 'delete' ? BOT_COLORS.error : BOT_COLORS.warn,
+    footer: 'Elysium • Logs'
+  })
     .addFields(
       { name: 'Auteur', value: details.author, inline: true },
       { name: 'Salon', value: details.channel, inline: true },
@@ -447,14 +479,14 @@ client.on('guildMemberAdd', async (member) => {
   if (!channel || !channel.isTextBased()) return;
 
   const attachment = new AttachmentBuilder(path.join(__dirname, 'assets', 'bienvenue.png')).setName('bienvenue.png');
-  const embed = new EmbedBuilder()
-    .setColor(BOT_COLORS.success)
-    .setTitle(`${EMOJIS.welcome} Bienvenue sur Elysium`)
-    .setDescription(`Salut ${member}, bienvenue dans la famille Elysium ! Nous sommes ravis de te voir ici.`)
-    .setThumbnail(member.displayAvatarURL({ dynamic: true }))
-    .setImage('attachment://bienvenue.png')
-    .setFooter({ text: 'Elysium • Bienvenue' })
-    .setTimestamp();
+  const embed = buildEmbed({
+      title: `${EMOJIS.welcome} Bienvenue sur Elysium`, 
+      description: `Salut ${member}, nous sommes ravis de te compter parmi nous ! Commence par découvrir les salons et lire les règles.`, 
+      color: BOT_COLORS.success,
+      thumbnail: member.displayAvatarURL({ dynamic: true }),
+      image: 'attachment://bienvenue.png',
+      footer: 'Elysium • Bienvenue'
+    });
 
   await channel.send({ content: `<@${member.id}>`, embeds: [embed], files: [attachment] });
 });
@@ -520,12 +552,8 @@ client.on('messageCreate', async (message) => {
     if (data.count >= SPAM_THRESHOLD) {
       try {
         await member.timeout(SPAM_MUTE_DURATION, 'Spam détecté');
-        const embed = new EmbedBuilder()
-          .setColor(BOT_COLORS.error)
-          .setTitle(`${EMOJIS.error} Mute automatique`) 
-          .setDescription(`${member} a été mis en timeout pendant 1 minute pour spam.`)
-          .setFooter({ text: 'Elysium • Anti-spam' })
-          .setTimestamp();
+        const embed = errorEmbed(`${EMOJIS.error} Mute automatique`, `${member} a été mis en timeout pendant 1 minute pour spam.`)
+          .setFooter({ text: 'Elysium • Anti-spam' });
         await message.channel.send({ embeds: [embed] });
       } catch (error) {
         // silently ignore timeout errors if bot permissions are insufficient
@@ -545,27 +573,16 @@ client.on('messageCreate', async (message) => {
   if (!command) return;
 
   if (command === 'help') {
-    const embed = new EmbedBuilder()
-      .setColor(BOT_COLORS.default)
-      .setTitle(`${EMOJIS.help} Commandes du bot`)
-      .setDescription('Préfixe utilisé : `+`')
-      .addFields(
-        { name: '+warn @user raison', value: 'Ajoute un warn à un utilisateur.' },
-        { name: '+warnings @user', value: 'Affiche tous les warns d’un utilisateur.' },
-        { name: '+ban @user raison', value: 'Bannit un utilisateur.' },
-        { name: '+kick @user raison', value: 'Expulse un utilisateur.' },
-        { name: '+mute @member durée raison', value: 'Mute un membre (si ajouté plus tard).' },
-        { name: '+unmute @member', value: 'Démute un membre (si ajouté plus tard).' },
-        { name: '+purge <1-100>', value: 'Supprime les messages du salon et envoie un résumé en MP.' },
-        { name: '+rules', value: 'Affiche le règlement du serveur.' },
-        { name: '+tos', value: 'Affiche les réseaux sociaux du serveur.' },
-        { name: '+ticket <type>', value: 'Ouvre un ticket pour aide, giveaway, claim, aide-économie.' },
-        { name: '+setup-ticket-panel', value: 'Affiche de nouveau le panneau de tickets.' },
-        { name: '+test image', value: 'Envoie toutes les images du bot.' },
-        { name: '+test emoji', value: 'Affiche tous les emojis utilisés par le bot.' }
-      )
-      .setFooter({ text: 'Elysium • Bot de modération' })
-      .setTimestamp();
+    const embed = infoEmbed(
+      `${EMOJIS.help} Commandes du bot`,
+      'Préfixe utilisé : `+`\nVoici toutes les commandes disponibles pour gérer le serveur et ouvrir des tickets.'
+    );
+    embed.addFields(
+      { name: '🛡️ Modération', value: '`+warn`, `+warnings`, `+ban`, `+kick`, `+purge`' },
+      { name: '🎟️ Tickets', value: '`+ticket <type>`, `+setup-ticket-panel`, `+close`' },
+      { name: '📜 Info', value: '`+rules`, `+tos`, `+test image`, `+test emoji`' }
+    );
+    embed.setFooter({ text: 'Elysium • Commandes' });
     await message.channel.send({ embeds: [embed] });
     return;
   }
@@ -585,12 +602,11 @@ client.on('messageCreate', async (message) => {
     const reason = args.slice(1).join(' ') || 'Aucune raison fournie';
     const updatedWarnings = addWarning(message.guild.id, target.id, message.author.id, reason);
 
-    const embed = new EmbedBuilder()
-      .setColor('#f3c53d')
-      .setTitle('Warn ajouté')
-      .setDescription(`${target} a reçu un warn.`)
-      .addFields({ name: 'Raison', value: reason }, { name: 'Total', value: `${updatedWarnings.length}` });
-
+    const embed = warningEmbed(`${EMOJIS.warn} Warn ajouté`, `${target} a reçu un warn.`);
+    embed.addFields(
+      { name: 'Raison', value: reason, inline: true },
+      { name: 'Total', value: `${updatedWarnings.length}`, inline: true }
+    );
     await message.channel.send({ embeds: [embed] });
     return;
   }
@@ -608,18 +624,13 @@ client.on('messageCreate', async (message) => {
     }
 
     const warnings = loadWarnings()[message.guild.id]?.[target.id] || [];
-    const embed = new EmbedBuilder()
-      .setColor(BOT_COLORS.info)
-      .setTitle(`${EMOJIS.warn} Warns de ${target.user.tag}`)
-      .setDescription(warnings.length ? 'Voici les warns enregistrés :' : 'Aucun warn enregistré.')
-      .setFooter({ text: 'Historique des sanctions' })
-      .setTimestamp();
+    const embed = infoEmbed(`${EMOJIS.warn} Warns de ${target.user.tag}`, warnings.length ? 'Voici les warns enregistrés :' : 'Aucun warn enregistré.');
 
     if (warnings.length) {
       warnings.forEach((warning, index) => {
         embed.addFields({
           name: `Warn ${index + 1}`,
-          value: `Raison : ${warning.reason}\nModérateur : <@${warning.moderatorId}>\nDate : ${warning.date}`
+          value: `**Raison :** ${warning.reason}\n**Modérateur :** <@${warning.moderatorId}>\n**Date :** ${warning.date}`
         });
       });
     }
@@ -734,12 +745,8 @@ client.on('messageCreate', async (message) => {
     }
 
     const panelChannel = message.channel;
-    const embed = new EmbedBuilder()
-      .setColor(BOT_COLORS.default)
-      .setTitle(`${EMOJIS.categories} Panel de tickets`)
-      .setDescription('Pour ouvrir un ticket, utilise la commande : `+ticket <type>`\nExemple : `+ticket aide`\nSi tu veux un ticket pour un giveaway ou un claim, utilise `+ticket giveaway` ou `+ticket claim`.')
-      .setFooter({ text: 'Elysium • Ticket System' })
-      .setTimestamp();
+    const embed = infoEmbed(`${EMOJIS.categories} Panel de tickets`, 'Choisis un type de ticket et un salon sera créé automatiquement pour toi. Les admins pourront répondre directement.')
+      .setFooter({ text: 'Elysium • Ticket System' });
 
     const sent = await panelChannel.send({ embeds: [embed] });
 
@@ -805,17 +812,13 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
-    const embed = new EmbedBuilder()
-      .setColor(BOT_COLORS.info)
-      .setTitle(`${EMOJIS.tos} Conditions générales`)
-      .setDescription('Voici nos coordonnées et réseaux sociaux.')
+    const embed = infoEmbed(`${EMOJIS.tos} Conditions générales`, 'Retrouve ici les principaux réseaux sociaux de la communauté et contacte-nous en privé si besoin.')
       .addFields(
         { name: 'TikTok', value: '@Elysium.Zen.Ashu', inline: true },
         { name: 'Instagram', value: '@Elysium.Zen.Ashu', inline: true },
         { name: 'Gmail', value: 'Elysium.dsd@gmail.com', inline: true }
       )
-      .setFooter({ text: 'Elysium • Contact' })
-      .setTimestamp();
+      .setFooter({ text: 'Elysium • Contact' });
 
     await message.channel.send({ embeds: [embed] });
     return;
@@ -828,11 +831,14 @@ client.on('messageCreate', async (message) => {
     }
 
     const attachment = new AttachmentBuilder(path.join(__dirname, 'assets', 'reglement.png')).setName('reglement.png');
-    const embed = new EmbedBuilder()
-      .setColor('#5B6CFF')
-      .setTitle('🌌 • Règlement d’Elysium')
-      .setDescription('Bienvenue sur Elysium ! @everyone\n\nNotre objectif est simple : créer une communauté où chacun peut discuter, jouer, rencontrer de nouvelles personnes et passer un bon moment dans une ambiance conviviale.\n\nMerci de respecter les quelques règles suivantes.')
-      .setThumbnail('https://cdn.discordapp.com/embed/avatars/0.png')
+    const embed = buildEmbed({
+      title: '🌌 • Règlement d’Elysium',
+      description: 'Bienvenue sur Elysium ! @everyone\n\nNotre objectif est simple : créer une communauté où chacun peut discuter, jouer, rencontrer de nouvelles personnes et passer un bon moment dans une ambiance conviviale.\n\nMerci de respecter les quelques règles suivantes.',
+      color: BOT_COLORS.default,
+      thumbnail: 'https://cdn.discordapp.com/embed/avatars/0.png',
+      image: 'attachment://reglement.png',
+      footer: 'Elysium • Règlement'
+    })
       .addFields(
         { name: '🤝 • Respect', value: '• Respectez tous les membres du serveur.\n• Les insultes, le harcèlement, les discriminations et les provocations répétées n’ont pas leur place sur Elysium.' },
         { name: '💬 • Utilisez les bons salons', value: '• Merci d’envoyer vos messages dans le salon correspondant.\n• Prenez quelques secondes pour vérifier où vous écrivez afin de garder le serveur organisé.' },

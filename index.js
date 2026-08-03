@@ -4,6 +4,11 @@ const http = require('http');
 const path = require('path');
 const { MongoClient } = require('mongodb');
 const {
+  loadLevelsFromFile,
+  saveUserLevelDataToFile,
+  getUserLevelDataFromFile
+} = require('./level-storage');
+const {
   Client,
   GatewayIntentBits,
   Partials,
@@ -272,33 +277,33 @@ async function initMongo() {
 }
 
 async function getUserLevelData(guildId, userId) {
-  if (!levelsCollection) {
-    return { xp: 0, level: 1 };
+  if (levelsCollection) {
+    try {
+      const record = await levelsCollection.findOne({ guildId, userId });
+      return record || { xp: 0, level: 1 };
+    } catch (error) {
+      console.error('❌ Erreur lors de la lecture des données de niveau:', error.message);
+    }
   }
 
-  try {
-    const record = await levelsCollection.findOne({ guildId, userId });
-    return record || { xp: 0, level: 1 };
-  } catch (error) {
-    console.error('❌ Erreur lors de la lecture des données de niveau:', error.message);
-    return { xp: 0, level: 1 };
-  }
+  return getUserLevelDataFromFile(levelsFile, guildId, userId);
 }
 
 async function saveUserLevelData(guildId, userId, data) {
-  if (!levelsCollection) {
-    return;
+  if (levelsCollection) {
+    try {
+      await levelsCollection.updateOne(
+        { guildId, userId },
+        { $set: { guildId, userId, ...data } },
+        { upsert: true }
+      );
+      return;
+    } catch (error) {
+      console.error('❌ Erreur lors de la sauvegarde des données de niveau:', error.message);
+    }
   }
 
-  try {
-    await levelsCollection.updateOne(
-      { guildId, userId },
-      { $set: { guildId, userId, ...data } },
-      { upsert: true }
-    );
-  } catch (error) {
-    console.error('❌ Erreur lors de la sauvegarde des données de niveau:', error.message);
-  }
+  saveUserLevelDataToFile(levelsFile, guildId, userId, data);
 }
 
 function createProgressBar(current, max, size = 10) {
@@ -887,15 +892,21 @@ client.on('messageCreate', async (message) => {
 
   if (command === 'leaderboard' || command === 'top') {
     await initMongo();
-    if (!levelsCollection) {
-      await message.reply('Base de données indisponible.');
-      return;
-    }
 
-    const topUsers = await levelsCollection.find({ guildId: message.guild.id })
-      .sort({ level: -1, xp: -1 })
-      .limit(10)
-      .toArray();
+    let topUsers = [];
+    if (levelsCollection) {
+      topUsers = await levelsCollection.find({ guildId: message.guild.id })
+        .sort({ level: -1, xp: -1 })
+        .limit(10)
+        .toArray();
+    } else {
+      const stored = loadLevelsFromFile(levelsFile);
+      const guildEntries = stored[message.guild.id] || {};
+      topUsers = Object.entries(guildEntries)
+        .map(([userId, entry]) => ({ userId, ...entry }))
+        .sort((a, b) => (b.level || 1) - (a.level || 1) || (b.xp || 0) - (a.xp || 0))
+        .slice(0, 10);
+    }
 
     if (topUsers.length === 0) {
       await message.reply('Aucun classement disponible pour l\'instant.');
@@ -906,7 +917,7 @@ client.on('messageCreate', async (message) => {
       const user = await client.users.fetch(entry.userId).catch(() => null);
       const username = user ? user.username : 'Utilisateur inconnu';
       const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : '🔹';
-      return `${medal} **#${index + 1}** | **${username}** — Niv. **${entry.level}** (${entry.xp} XP)`;
+      return `${medal} **#${index + 1}** | **${username}** — Niv. **${entry.level || 1}** (${entry.xp || 0} XP)`;
     }));
 
     const embed = infoEmbed('🏆 Classement des membres les plus actifs', leaderboardText.join('\n'));

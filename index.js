@@ -59,6 +59,10 @@ const BOT_COLORS = {
 const LEVEL_CHANNEL_ID = process.env.LEVEL_CHANNEL_ID || '1533511740183019550';
 const LEVEL_IMAGE_NAME = 'lvl.png';
 const XP_PER_MESSAGE = 5;
+const SPAM_THRESHOLD = 5;
+const SPAM_WINDOW = 10_000; // 10 secondes
+const SPAM_MUTE_DURATION = 60_000; // 1 minute
+const spamRecords = new Map();
 
 const guildId = process.env.GUILD_ID || null;
 const welcomeChannelId = process.env.WELCOME_CHANNEL_ID || '1533505331177590814';
@@ -451,6 +455,38 @@ client.on('interactionCreate', async (interaction) => {
 
 client.on('messageCreate', async (message) => {
   if (!message.guild || message.author.bot) return;
+
+  const member = await message.guild.members.fetch(message.author.id).catch(() => null);
+  if (member && !member.permissions.has(PermissionFlagsBits.Administrator)) {
+    const now = Date.now();
+    const data = spamRecords.get(message.author.id) || { count: 0, last: 0 };
+
+    if (now - data.last > SPAM_WINDOW) {
+      data.count = 1;
+    } else {
+      data.count += 1;
+    }
+
+    data.last = now;
+    spamRecords.set(message.author.id, data);
+
+    if (data.count >= SPAM_THRESHOLD) {
+      try {
+        await member.timeout(SPAM_MUTE_DURATION, 'Spam détecté');
+        const embed = new EmbedBuilder()
+          .setColor(BOT_COLORS.error)
+          .setTitle(`${EMOJIS.error} Mute automatique`) 
+          .setDescription(`${member} a été mis en timeout pendant 1 minute pour spam.`)
+          .setFooter({ text: 'Elysium • Anti-spam' })
+          .setTimestamp();
+        await message.channel.send({ embeds: [embed] });
+      } catch (error) {
+        // silently ignore timeout errors if bot permissions are insufficient
+      }
+      spamRecords.delete(message.author.id);
+      return;
+    }
+  }
 
   await processLevel(message);
 

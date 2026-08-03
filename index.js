@@ -1,6 +1,7 @@
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
+const { MongoClient } = require('mongodb');
 const {
   Client,
   GatewayIntentBits,
@@ -63,8 +64,13 @@ const SPAM_THRESHOLD = 5;
 const SPAM_WINDOW = 10_000; // 10 secondes
 const SPAM_MUTE_DURATION = 60_000; // 1 minute
 const AUTO_DELETE_CHANNEL_ID = process.env.AUTO_DELETE_CHANNEL_ID || '1533505601773113456';
+const MONGO_URI = process.env.MONGO_URI || '';
+const DB_NAME = process.env.DB_NAME || 'elysium_bot';
+const LEVELS_COLLECTION = 'levels';
 const spamRecords = new Map();
 const lastMessageByChannel = new Map();
+let mongoClient = null;
+let levelsCollection = null;
 
 const guildId = process.env.GUILD_ID || null;
 const welcomeChannelId = process.env.WELCOME_CHANNEL_ID || '1533505331177590814';
@@ -191,27 +197,56 @@ async function sendLevelUpMessage(guild, user, level) {
   await channel.send({ embeds: [embed], files: [attachment] });
 }
 
+async function initMongo() {
+  if (!MONGO_URI) return;
+  if (mongoClient) return;
+
+  mongoClient = new MongoClient(MONGO_URI);
+  await mongoClient.connect();
+  const db = mongoClient.db(DB_NAME);
+  levelsCollection = db.collection(LEVELS_COLLECTION);
+  await levelsCollection.createIndex({ guildId: 1, userId: 1 }, { unique: true });
+}
+
+async function getUserLevelData(guildId, userId) {
+  if (!levelsCollection) {
+    return { xp: 0, level: 1 };
+  }
+
+  const record = await levelsCollection.findOne({ guildId, userId });
+  return record || { xp: 0, level: 1 };
+}
+
+async function saveUserLevelData(guildId, userId, data) {
+  if (!levelsCollection) {
+    return;
+  }
+
+  await levelsCollection.updateOne(
+    { guildId, userId },
+    { $set: { guildId, userId, ...data } },
+    { upsert: true }
+  );
+}
+
 async function processLevel(message) {
   if (!message.guild || message.author.bot) return;
 
-  const levels = loadLevels();
-  if (!levels[message.guild.id]) {
-    levels[message.guild.id] = {};
-  }
-
+  await initMongo();
   const userId = message.author.id;
-  const userData = levels[message.guild.id][userId] || { xp: 0, level: 1 };
-  userData.xp += XP_PER_MESSAGE;
+  const guildId = message.guild.id;
+  const userData = await getUserLevelData(guildId, userId);
 
-  const target = xpToNextLevel(userData.level);
+  userData.xp = (userData.xp || 0) + XP_PER_MESSAGE;
+
+  const target = xpToNextLevel(userData.level || 1);
   if (userData.xp >= target) {
     userData.xp -= target;
-    userData.level += 1;
+    userData.level = (userData.level || 1) + 1;
     await sendLevelUpMessage(message.guild, message.author, userData.level);
   }
 
-  levels[message.guild.id][userId] = userData;
-  saveLevels(levels);
+  await saveUserLevelData(guildId, userId, userData);
 }
 
 function addWarning(guildIdValue, userId, moderatorId, reason) {
@@ -356,6 +391,8 @@ async function createTicketChannel(guild, user, categoryValue) {
 
 client.once('ready', async () => {
   console.log(`Bot prêt : ${client.user.tag}`);
+
+  await initMongo();
 
   if (guildId) {
     const guild = client.guilds.cache.get(guildId) || await client.guilds.fetch(guildId).catch(() => null);

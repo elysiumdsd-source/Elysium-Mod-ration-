@@ -8,6 +8,7 @@ const {
   saveUserLevelDataToFile,
   getUserLevelDataFromFile
 } = require('./level-storage');
+const { DEFAULT_PREFIX, getCommandParts } = require('./command-prefix');
 const {
   Client,
   GatewayIntentBits,
@@ -34,7 +35,7 @@ const client = new Client({
   partials: [Partials.Message, Partials.Channel, Partials.Reaction]
 });
 
-const prefix = '+';
+const prefix = DEFAULT_PREFIX;
 const adminIds = (process.env.ADMIN_IDS || '1497279403619647648,827492150760570883')
   .split(',')
   .map((id) => id.trim())
@@ -740,22 +741,21 @@ client.on('messageCreate', async (message) => {
 
   await processLevel(message);
 
-  if (!message.content.startsWith(prefix)) return;
+  const parsed = getCommandParts(message.content);
+  if (!parsed) return;
 
-  const args = message.content.slice(prefix.length).trim().split(/\s+/);
-  const command = args.shift()?.toLowerCase();
-
+  const { command, args } = parsed;
   if (!command) return;
 
   if (command === 'help') {
     const embed = infoEmbed(
       `${EMOJIS.help} Commandes du bot`,
-      'Préfixe utilisé : `+`\nVoici toutes les commandes disponibles pour gérer le serveur et ouvrir des tickets.'
+      `Préfixe utilisé : \`${prefix}\`\nVoici toutes les commandes disponibles pour gérer le serveur et ouvrir des tickets.'
     );
     embed.addFields(
-      { name: '🛡️ Modération', value: '`+warn`, `+warnings`, `+ban`, `+kick`, `+purge`' },
-      { name: '🎟️ Tickets', value: '`+ticket <type>`, `+setup-ticket-panel`, `+close`' },
-      { name: '📜 Info', value: '`+rules`, `+tos`, `+test image`, `+test emoji`' }
+      { name: '🛡️ Modération', value: '`-warn`, `-warnings`, `-ban`, `-kick`, `-purge`' },
+      { name: '🎟️ Tickets', value: '`-ticket <type>`, `-setup-ticket-panel`, `-close`' },
+      { name: '📜 Info', value: '`-rules`, `-tos`, `-test image`, `-test emoji`' }
     );
     embed.setFooter({ text: 'Elysium • Commandes' });
     await message.channel.send({ embeds: [embed] });

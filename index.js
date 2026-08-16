@@ -747,20 +747,22 @@ client.on('messageCreate', async (message) => {
   const { command, args } = parsed;
   if (!command) return;
 
-  if (command === 'help') {
-    const embed = infoEmbed(
-      `${EMOJIS.help} Commandes du bot`,
-      `Préfixe utilisé : \`${prefix}\`\nVoici toutes les commandes disponibles pour gérer le serveur et ouvrir des tickets.'
-    );
-    embed.addFields(
-      { name: '🛡️ Modération', value: '`-warn`, `-warnings`, `-ban`, `-kick`, `-purge`' },
-      { name: '🎟️ Tickets', value: '`-ticket <type>`, `-setup-ticket-panel`, `-close`' },
-      { name: '📜 Info', value: '`-rules`, `-tos`, `-test image`, `-test emoji`' }
-    );
-    embed.setFooter({ text: 'Elysium • Commandes' });
-    await message.channel.send({ embeds: [embed] });
-    return;
-  }
+if (command === 'help') {
+  const embed = infoEmbed(
+    `${EMOJIS.help} Commandes du bot`,
+    `Préfixe utilisé : \`${prefix}\`\nVoici toutes les commandes disponibles pour gérer le serveur et ouvrir des tickets.`
+  );
+
+  embed.addFields(
+    { name: '🛡️ Modération', value: '`+warn`, `+warnings`, `+ban`, `+kick`, `+purge`' },
+    { name: '🎟️ Tickets', value: '`+ticket <type>`, `+setup-ticket-panel`, `+close`' },
+    { name: '📜 Info', value: '`+rules`, `+tos`, `+test image`, `+test emoji`' }
+  );
+
+  embed.setFooter({ text: 'Elysium • Commandes' });
+  await message.channel.send({ embeds: [embed] });
+  return;
+}
 
   if (command === 'warn') {
     if (!isAdmin(message.author.id)) {

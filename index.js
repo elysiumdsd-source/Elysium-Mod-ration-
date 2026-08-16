@@ -756,7 +756,7 @@ if (command === 'help') {
   embed.addFields(
     { name: '🛡️ Modération', value: '`+warn`, `+warnings`, `+ban`, `+kick`, `+purge`' },
     { name: '🎟️ Tickets', value: '`+ticket <type>`, `+setup-ticket-panel`, `+close`' },
-    { name: '📜 Info', value: '`+rules`, `+tos`, `+test image`, `+test emoji`' }
+    { name: '📜 Info', value: '`+rules`, `+test image`, `+test emoji`' }
   );
 
   embed.setFooter({ text: 'Elysium • Commandes' });
@@ -1071,23 +1071,6 @@ if (command === 'help') {
     return;
   }
 
-  if (command === 'tos') {
-    if (!isAdmin(message.author.id)) {
-      await message.reply('Seules les personnes autorisées peuvent utiliser cette commande.');
-      return;
-    }
-
-    const embed = infoEmbed(`${EMOJIS.tos} Conditions générales`, 'Retrouve ici les principaux réseaux sociaux de la communauté et contacte-nous en privé si besoin.')
-      .addFields(
-        { name: 'TikTok', value: '@Elysium.Zen.Ashu', inline: true },
-        { name: 'Instagram', value: '@Elysium.Zen.Ashu', inline: true },
-        { name: 'Gmail', value: 'Elysium.dsd@gmail.com', inline: true }
-      )
-      .setFooter({ text: 'Elysium • Contact' });
-
-    await message.channel.send({ embeds: [embed] });
-    return;
-  }
 
   if (command === 'rules') {
     if (!isAdmin(message.author.id)) {

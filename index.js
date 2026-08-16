@@ -42,17 +42,17 @@ const adminIds = (process.env.ADMIN_IDS || '1497279403619647648,8274921507605708
   .filter(Boolean);
 
 const EMOJIS = {
-  success: '<a:VerifySecu:1533785371983351808>',
-  error: '<a:error:1533785725542076577>',
-  warn: '<a:Warning:1533786003695734794>',
-  info: '<:Info:1533786220486983754>',
+  success: '<a:VerifySecu:1537214710951321602>',
+  error: '<a:error:1537215138703220776>',
+  warn: '<a:Warning:1537215268802265229>',
+  info: '<:Info:1537215204939792404>',
   ticket: '<:ticket:1533786391576838194>',
   close: '🔒',
   purge: '🧹',
   rules: '📜',
   tos: '📧',
-  welcome: '<:welcome:1533787702389117070>',
-  mod: '<:discord_moderator:1533787574882140193>',
+  welcome: '<:welcome:1537215076392767618>',
+  mod: '<:discord_moderator:1537215324766867516>',
   logs: '📝',
   categories: '📂',
   help: '<:Discord_Helper:1191360487963775038>'

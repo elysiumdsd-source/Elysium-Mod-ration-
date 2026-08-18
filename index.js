@@ -1121,4 +1121,20 @@ healthServer.listen(port, () => {
   console.log(`Health server listening on port ${port}`);
 });
 
-client.login(process.env.TOKEN || process.env.BOT_TOKEN);
+const token = process.env.TOKEN || process.env.BOT_TOKEN;
+
+console.log('🔑 TOKEN trouvé :', !!token);
+
+if (!token) {
+  console.error('❌ Aucun TOKEN Discord trouvé.');
+  process.exit(1);
+}
+
+client.login(token)
+  .then(() => {
+    console.log('✅ Connexion Discord réussie !');
+  })
+  .catch((error) => {
+    console.error('❌ ERREUR DISCORD LOGIN :', error);
+    process.exit(1);
+  });

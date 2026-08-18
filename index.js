@@ -1121,12 +1121,24 @@ healthServer.listen(port, () => {
   console.log(`Health server listening on port ${port}`);
 });
 
+client.on('error', (error) => {
+  console.error('❌ Discord Client Error:', error);
+});
+
+client.on('shardError', (error) => {
+  console.error('❌ Discord Shard Error:', error);
+});
+
+client.on('shardReady', (id) => {
+  console.log(`✅ Shard ${id} connectée à Discord`);
+});
+
 const token = process.env.TOKEN || process.env.BOT_TOKEN;
 
 console.log('🔑 TOKEN trouvé :', !!token);
 
 if (!token) {
-  console.error('❌ Aucun TOKEN Discord trouvé.');
+  console.error('❌ TOKEN Discord manquant');
   process.exit(1);
 }
 
@@ -1135,6 +1147,6 @@ client.login(token)
     console.log('✅ Connexion Discord réussie !');
   })
   .catch((error) => {
-    console.error('❌ ERREUR DISCORD LOGIN :', error);
+    console.error('❌ ERREUR LOGIN DISCORD :', error);
     process.exit(1);
   });

@@ -359,6 +359,20 @@ function createProgressBar(current, max, size = 10) {
   return '█'.repeat(progress) + '░'.repeat(emptyProgress);
 }
 
+// Fonction pour attribuer le rôle de niveau correspondant
+async function assignLevelRole(guild, member, level) {
+  const roleName = LEVEL_ROLES[level];
+  if (!roleName) return;
+
+  const role = guild.roles.cache.find((r) => r.name === roleName);
+  if (!role) return;
+
+  const allLevelRoleNames = Object.values(LEVEL_ROLES);
+  const rolesToRemove = member.roles.cache.filter((r) => allLevelRoleNames.includes(r.name));
+  await member.roles.remove(rolesToRemove).catch(() => null);
+  await member.roles.add(role).catch(() => null);
+}
+
 async function processLevel(message) {
   if (!message.guild || message.author.bot) return;
   if (xpCooldowns.has(message.author.id)) return;
@@ -377,18 +391,10 @@ async function processLevel(message) {
     userData.level = (userData.level || 1) + 1;
     await sendLevelUpMessage(message.guild, message.author, userData.level, xpGained);
 
-    const roleName = LEVEL_ROLES[userData.level];
-    if (roleName) {
-      const member = await message.guild.members.fetch(userId).catch(() => null);
-      if (member) {
-        const role = message.guild.roles.cache.find((r) => r.name === roleName);
-        if (role) {
-          const allLevelRoleNames = Object.values(LEVEL_ROLES);
-          const rolesToRemove = member.roles.cache.filter((r) => allLevelRoleNames.includes(r.name));
-          await member.roles.remove(rolesToRemove).catch(() => null);
-          await member.roles.add(role).catch(() => null);
-        }
-      }
+    // Attribution du rôle de niveau
+    const member = await message.guild.members.fetch(userId).catch(() => null);
+    if (member) {
+      await assignLevelRole(message.guild, member, userData.level);
     }
   }
 
@@ -700,7 +706,6 @@ function getTargetUser(interaction) {
 async function handleSlashCommand(interaction) {
   const { commandName, options, member, guild, user } = interaction;
 
-  // Vérifications d'admin pour les commandes de modération
   const adminCommands = ['warn', 'warnings', 'clearwarnings', 'ban', 'unban', 'kick', 'mute', 'unmute', 'purge', 'addlevel', 'rules'];
   if (adminCommands.includes(commandName) && !isAdmin(user.id) && !hasStaffRole(member)) {
     return interaction.reply({ content: 'Vous n’avez pas la permission d’utiliser cette commande.', flags: ['Ephemeral'] });
@@ -892,6 +897,13 @@ async function handleSlashCommand(interaction) {
       const userData = await getUserLevelData(guild.id, target.id);
       userData.level = (userData.level || 1) + levelsToAdd;
       await saveUserLevelData(guild.id, target.id, userData);
+
+      // Attribution du rôle de niveau (immédiatement)
+      const targetMember = await guild.members.fetch(target.id).catch(() => null);
+      if (targetMember) {
+        await assignLevelRole(guild, targetMember, userData.level);
+      }
+
       const embed = successEmbed(`${EMOJIS.success} Niveaux ajoutés`, `${target} a reçu **+${levelsToAdd}** niveau(x) !\n\n**Nouveau niveau :** ${userData.level}`)
         .setThumbnail(target.displayAvatarURL({ dynamic: true }));
       return interaction.reply({ embeds: [embed] });
@@ -932,7 +944,6 @@ client.once('ready', async () => {
 
   await initMongo();
 
-  // Enregistrement des commandes slash
   try {
     if (guildId) {
       const guild = client.guilds.cache.get(guildId) || await client.guilds.fetch(guildId).catch(() => null);
@@ -998,8 +1009,24 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
   });
 });
 
+// NOUVEAU : Log des suppressions de messages
+client.on('messageDelete', async (message) => {
+  if (!message.guild || message.author?.bot) return;
+
+  // Si le message a été supprimé en masse (purge), le contenu peut être null
+  const content = message.content || (message.attachments?.size ? `[pièce jointe: ${message.attachments.map(a => a.name).join(', ')}]` : 'Contenu indisponible (suppression en masse)');
+
+  await sendLog(message.guild, 'delete', {
+    description: `Un message a été supprimé dans ${message.channel}.`,
+    author: message.author?.tag || 'Auteur inconnu',
+    channel: `#${message.channel.name}`,
+    time: formatTimestamp(new Date()),
+    before: content,
+    after: null
+  });
+});
+
 client.on('interactionCreate', async (interaction) => {
-  // Gestion du bouton claim
   if (interaction.isButton() && interaction.customId === 'claim_ticket') {
     const member = interaction.member;
     if (!member || (!isAdmin(member.user.id) && !hasStaffRole(member))) {
@@ -1022,7 +1049,6 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // Gestion du menu de sélection de ticket
   if (interaction.isStringSelectMenu() && interaction.customId === 'ticket_select') {
     const ticketType = interaction.values[0];
     const item = TICKET_CATEGORIES.find((cat) => cat.value === ticketType);
@@ -1043,7 +1069,6 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // Gestion des commandes slash
   if (interaction.isChatInputCommand()) {
     await handleSlashCommand(interaction);
     return;
@@ -1341,6 +1366,9 @@ client.on('messageCreate', async (message) => {
     const userData = await getUserLevelData(message.guild.id, target.id);
     userData.level = (userData.level || 1) + levelsToAdd;
     await saveUserLevelData(message.guild.id, target.id, userData);
+
+    // Attribution immédiate du rôle de niveau
+    await assignLevelRole(message.guild, target, userData.level);
 
     const embed = successEmbed(`${EMOJIS.success} Niveaux ajoutés`, `${target} a reçu **+${levelsToAdd}** niveau(x) !\n\n**Nouveau niveau :** ${userData.level}`)
       .setThumbnail(target.displayAvatarURL({ dynamic: true }));

@@ -21,7 +21,9 @@ const {
   ButtonStyle,
   ChannelType,
   PermissionFlagsBits,
-  PermissionsBitField
+  PermissionsBitField,
+  ApplicationCommandOptionType,
+  SlashCommandBuilder
 } = require('discord.js');
 
 const client = new Client({
@@ -597,10 +599,354 @@ async function refreshTicketPanel(guild) {
   console.log(`🆕 Panneau de tickets rafraîchi dans ${panelChannel.name} (${guild.name}).`);
 }
 
+// ─── SLASH COMMANDS DATA ───────────────────────────────────────────
+const slashCommandsData = [
+  new SlashCommandBuilder()
+    .setName('help')
+    .setDescription('Affiche la liste des commandes'),
+  new SlashCommandBuilder()
+    .setName('warn')
+    .setDescription('Ajouter un avertissement à un membre')
+    .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre à avertir').setRequired(true))
+    .addStringOption(opt => opt.setName('raison').setDescription('Raison du warn').setRequired(false)),
+  new SlashCommandBuilder()
+    .setName('warnings')
+    .setDescription('Voir les avertissements d’un membre')
+    .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre concerné').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('clearwarnings')
+    .setDescription('Supprimer tous les warns d’un membre')
+    .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre concerné').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('ban')
+    .setDescription('Bannir un membre')
+    .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre à bannir').setRequired(true))
+    .addStringOption(opt => opt.setName('raison').setDescription('Raison du bannissement').setRequired(false)),
+  new SlashCommandBuilder()
+    .setName('unban')
+    .setDescription('Débannir un utilisateur par ID')
+    .addStringOption(opt => opt.setName('id').setDescription('ID de l’utilisateur à débannir').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('kick')
+    .setDescription('Expulser un membre')
+    .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre à expulser').setRequired(true))
+    .addStringOption(opt => opt.setName('raison').setDescription('Raison de l’expulsion').setRequired(false)),
+  new SlashCommandBuilder()
+    .setName('mute')
+    .setDescription('Rendre muet un membre (timeout)')
+    .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre à mute').setRequired(true))
+    .addStringOption(opt => opt.setName('durée').setDescription('Durée (ex: 10m, 1h, 1d)').setRequired(true))
+    .addStringOption(opt => opt.setName('raison').setDescription('Raison du mute').setRequired(false)),
+  new SlashCommandBuilder()
+    .setName('unmute')
+    .setDescription('Retirer le mute d’un membre')
+    .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre à unmute').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('purge')
+    .setDescription('Supprimer un certain nombre de messages')
+    .addIntegerOption(opt => opt.setName('nombre').setDescription('Nombre de messages à supprimer').setRequired(false)),
+  new SlashCommandBuilder()
+    .setName('setup-ticket-panel')
+    .setDescription('Configurer le panneau de tickets dans ce salon'),
+  new SlashCommandBuilder()
+    .setName('ticket')
+    .setDescription('Ouvrir un ticket manuellement')
+    .addStringOption(opt => opt.setName('type').setDescription('Type de ticket').setRequired(false)
+      .addChoices(...TICKET_CATEGORIES.map(cat => ({ name: cat.label, value: cat.value })))),
+  new SlashCommandBuilder()
+    .setName('rank')
+    .setDescription('Afficher le niveau d’un membre')
+    .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre (optionnel)').setRequired(false)),
+  new SlashCommandBuilder()
+    .setName('level')
+    .setDescription('Afficher le niveau d’un membre')
+    .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre (optionnel)').setRequired(false)),
+  new SlashCommandBuilder()
+    .setName('leaderboard')
+    .setDescription('Afficher le classement des membres'),
+  new SlashCommandBuilder()
+    .setName('top')
+    .setDescription('Afficher le classement des membres'),
+  new SlashCommandBuilder()
+    .setName('addlevel')
+    .setDescription('Ajouter des niveaux à un membre (admin)')
+    .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre concerné').setRequired(true))
+    .addIntegerOption(opt => opt.setName('niveaux').setDescription('Nombre de niveaux à ajouter').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('rules')
+    .setDescription('Envoyer le règlement du serveur')
+];
+
+// ─── HELPERS ───────────────────────────────────────────────────────
+function parseDuration(durationString) {
+  const match = durationString.toLowerCase().match(/^(\d+)([smhd])$/);
+  if (!match) return null;
+  const value = parseInt(match[1], 10);
+  const unit = match[2];
+  switch (unit) {
+    case 's': return value * 1000;
+    case 'm': return value * 60 * 1000;
+    case 'h': return value * 60 * 60 * 1000;
+    case 'd': return value * 24 * 60 * 60 * 1000;
+    default: return null;
+  }
+}
+
+function getTargetUser(interaction) {
+  return interaction.options.getUser('utilisateur') || interaction.user;
+}
+
+// ─── SLASH COMMAND HANDLER ─────────────────────────────────────────
+async function handleSlashCommand(interaction) {
+  const { commandName, options, member, guild, user } = interaction;
+
+  // Vérifications d'admin pour les commandes de modération
+  const adminCommands = ['warn', 'warnings', 'clearwarnings', 'ban', 'unban', 'kick', 'mute', 'unmute', 'purge', 'addlevel', 'rules'];
+  if (adminCommands.includes(commandName) && !isAdmin(user.id) && !hasStaffRole(member)) {
+    return interaction.reply({ content: 'Vous n’avez pas la permission d’utiliser cette commande.', flags: ['Ephemeral'] });
+  }
+
+  switch (commandName) {
+    case 'help': {
+      const embed = infoEmbed(`${EMOJIS.help} Commandes du bot`, `Préfixe : \`${prefix}\`\nVoici les commandes slash disponibles.`)
+        .addFields(
+          { name: '🛡️ Modération', value: '`/warn`, `/warnings`, `/clearwarnings`, `/ban`, `/unban`, `/kick`, `/mute`, `/unmute`, `/purge`' },
+          { name: '🎟️ Tickets', value: '`/ticket`, `/setup-ticket-panel`' },
+          { name: '📜 Info', value: '`/rules`, `/rank`, `/level`, `/leaderboard`, `/top`, `/addlevel`' }
+        )
+        .setFooter({ text: 'Elysium • Commandes' });
+      return interaction.reply({ embeds: [embed] });
+    }
+
+    case 'warn': {
+      const target = options.getUser('utilisateur', true);
+      const reason = options.getString('raison') || 'Aucune raison fournie';
+      const targetMember = await guild.members.fetch(target.id).catch(() => null);
+      if (!targetMember) return interaction.reply({ content: 'Membre introuvable.', flags: ['Ephemeral'] });
+      const updatedWarnings = addWarning(guild.id, target.id, user.id, reason);
+      const embed = warningEmbed(`${EMOJIS.warn} Warn ajouté`, `${target} a reçu un warn.`)
+        .addFields(
+          { name: 'Raison', value: reason, inline: true },
+          { name: 'Total', value: `${updatedWarnings.length}`, inline: true }
+        );
+      return interaction.reply({ embeds: [embed] });
+    }
+
+    case 'warnings': {
+      const target = options.getUser('utilisateur', true);
+      const warnings = loadWarnings()[guild.id]?.[target.id] || [];
+      const embed = infoEmbed(`${EMOJIS.warn} Warns de ${target.tag}`, warnings.length ? 'Voici les warns enregistrés :' : 'Aucun warn enregistré.');
+      if (warnings.length) {
+        warnings.forEach((warning, index) => {
+          embed.addFields({
+            name: `Warn ${index + 1}`,
+            value: `**Raison :** ${warning.reason}\n**Modérateur :** <@${warning.moderatorId}>\n**Date :** ${warning.date}`
+          });
+        });
+      }
+      return interaction.reply({ embeds: [embed] });
+    }
+
+    case 'clearwarnings': {
+      const target = options.getUser('utilisateur', true);
+      clearWarnings(guild.id, target.id);
+      return interaction.reply({ content: `Les warns de ${target} ont été supprimés.`, flags: ['Ephemeral'] });
+    }
+
+    case 'ban': {
+      const target = options.getUser('utilisateur', true);
+      const reason = options.getString('raison') || 'Aucune raison fournie';
+      const targetMember = await guild.members.fetch(target.id).catch(() => null);
+      if (!targetMember) return interaction.reply({ content: 'Membre introuvable.', flags: ['Ephemeral'] });
+      await targetMember.ban({ reason });
+      return interaction.reply({ content: `${target.tag} a été banni. Raison : ${reason}` });
+    }
+
+    case 'unban': {
+      const userId = options.getString('id', true);
+      try {
+        await guild.members.unban(userId);
+        return interaction.reply({ content: `L’utilisateur ${userId} a été débanni.` });
+      } catch {
+        return interaction.reply({ content: 'Impossible de débannir cet utilisateur.', flags: ['Ephemeral'] });
+      }
+    }
+
+    case 'kick': {
+      const target = options.getUser('utilisateur', true);
+      const reason = options.getString('raison') || 'Aucune raison fournie';
+      const targetMember = await guild.members.fetch(target.id).catch(() => null);
+      if (!targetMember) return interaction.reply({ content: 'Membre introuvable.', flags: ['Ephemeral'] });
+      await targetMember.kick(reason);
+      return interaction.reply({ content: `${target.tag} a été expulsé. Raison : ${reason}` });
+    }
+
+    case 'mute': {
+      const target = options.getUser('utilisateur', true);
+      const durationString = options.getString('durée', true);
+      const reason = options.getString('raison') || 'Aucune raison fournie';
+      const duration = parseDuration(durationString);
+      if (!duration) return interaction.reply({ content: 'Durée invalide. Utilisez un format comme `10m`, `1h`, `1d`.', flags: ['Ephemeral'] });
+      const targetMember = await guild.members.fetch(target.id).catch(() => null);
+      if (!targetMember) return interaction.reply({ content: 'Membre introuvable.', flags: ['Ephemeral'] });
+      await targetMember.timeout(duration, reason);
+      return interaction.reply({ content: `${target} a été rendu muet pendant ${durationString}. Raison : ${reason}` });
+    }
+
+    case 'unmute': {
+      const target = options.getUser('utilisateur', true);
+      const targetMember = await guild.members.fetch(target.id).catch(() => null);
+      if (!targetMember) return interaction.reply({ content: 'Membre introuvable.', flags: ['Ephemeral'] });
+      await targetMember.timeout(null, 'Unmute');
+      return interaction.reply({ content: `${target} n’est plus muet.` });
+    }
+
+    case 'purge': {
+      const requestedCount = options.getInteger('nombre');
+      if (!interaction.channel.permissionsFor(guild.members.me).has(PermissionFlagsBits.ManageMessages)) {
+        return interaction.reply({ content: 'Le bot n’a pas la permission de gérer les messages dans ce salon.', flags: ['Ephemeral'] });
+      }
+      const deletedCount = await purgeChannel(interaction.channel, requestedCount || null);
+      return interaction.reply({ content: `Purge terminée. ${deletedCount} message(s) supprimé(s).`, flags: ['Ephemeral'] });
+    }
+
+    case 'setup-ticket-panel': {
+      const panelChannel = interaction.channel;
+      const embed = infoEmbed(`${EMOJIS.categories} Panel de tickets`, 'Choisis un type de ticket et un salon sera créé automatiquement pour toi. Les admins pourront répondre directement.')
+        .setFooter({ text: 'Elysium • Ticket System' });
+      const sent = await panelChannel.send({ embeds: [embed] });
+      const panels = loadTicketPanels();
+      panels[guild.id] = sent.id;
+      saveTicketPanels(panels);
+      return interaction.reply({ content: 'Le panel de tickets a été configuré.', flags: ['Ephemeral'] });
+    }
+
+    case 'ticket': {
+      const type = options.getString('type') || 'aide';
+      const selected = TICKET_CATEGORIES.find((item) => item.value === type);
+      const value = selected ? selected.label : 'Aide';
+      const ticketUser = interaction.user;
+      const channel = await createTicketChannel(guild, ticketUser, value);
+      return interaction.reply({ content: `Ton ticket a été créé dans ${channel}.`, flags: ['Ephemeral'] });
+    }
+
+    case 'rank':
+    case 'level': {
+      const target = getTargetUser(interaction);
+      await initMongo();
+      const userData = await getUserLevelData(guild.id, target.id);
+      const currentLevel = userData.level || 1;
+      const currentXP = userData.xp || 0;
+      const neededXP = xpToNextLevel(currentLevel);
+      const progressBar = createProgressBar(currentXP, neededXP);
+      const percent = Math.floor((currentXP / neededXP) * 100);
+
+      const embed = infoEmbed(`${EMOJIS.welcome} Niveau de ${target.username}`, 'Voici les statistiques de progression sur **Elysium** :')
+        .setThumbnail(target.displayAvatarURL({ dynamic: true, size: 256 }))
+        .addFields(
+          { name: 'Niveau', value: `**${currentLevel}**`, inline: true },
+          { name: 'XP Actuel', value: `**${currentXP}** / ${neededXP} XP`, inline: true },
+          { name: 'Progression', value: `\`[${progressBar}]\` **${percent}%**` }
+        );
+      return interaction.reply({ embeds: [embed] });
+    }
+
+    case 'leaderboard':
+    case 'top': {
+      await initMongo();
+      let topUsers = [];
+      if (levelsCollection) {
+        topUsers = await levelsCollection.find({ guildId: guild.id })
+          .sort({ level: -1, xp: -1 })
+          .limit(10)
+          .toArray();
+      } else {
+        const stored = loadLevelsFromFile(levelsFile);
+        const guildEntries = stored[guild.id] || {};
+        topUsers = Object.entries(guildEntries)
+          .map(([userId, entry]) => ({ userId, ...entry }))
+          .sort((a, b) => (b.level || 1) - (a.level || 1) || (b.xp || 0) - (a.xp || 0))
+          .slice(0, 10);
+      }
+
+      if (topUsers.length === 0) {
+        return interaction.reply({ content: 'Aucun classement disponible pour l’instant.', flags: ['Ephemeral'] });
+      }
+
+      const leaderboardText = await Promise.all(topUsers.map(async (entry, index) => {
+        const user = await client.users.fetch(entry.userId).catch(() => null);
+        const username = user ? user.username : 'Utilisateur inconnu';
+        const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : '🔹';
+        return `${medal} **#${index + 1}** | **${username}** — Niv. **${entry.level || 1}** (${entry.xp || 0} XP)`;
+      }));
+
+      const embed = infoEmbed('🏆 Classement des membres les plus actifs', leaderboardText.join('\n'));
+      return interaction.reply({ embeds: [embed] });
+    }
+
+    case 'addlevel': {
+      const target = options.getUser('utilisateur', true);
+      const levelsToAdd = options.getInteger('niveaux', true);
+      if (levelsToAdd < 1) return interaction.reply({ content: 'Le nombre de niveaux doit être supérieur à 0.', flags: ['Ephemeral'] });
+      await initMongo();
+      const userData = await getUserLevelData(guild.id, target.id);
+      userData.level = (userData.level || 1) + levelsToAdd;
+      await saveUserLevelData(guild.id, target.id, userData);
+      const embed = successEmbed(`${EMOJIS.success} Niveaux ajoutés`, `${target} a reçu **+${levelsToAdd}** niveau(x) !\n\n**Nouveau niveau :** ${userData.level}`)
+        .setThumbnail(target.displayAvatarURL({ dynamic: true }));
+      return interaction.reply({ embeds: [embed] });
+    }
+
+    case 'rules': {
+      const attachment = new AttachmentBuilder(path.join(__dirname, 'assets', 'reglement.png')).setName('reglement.png');
+      const embed = buildEmbed({
+        title: '🌌 • Règlement d’Elysium',
+        description: 'Bienvenue sur Elysium ! @everyone\n\nNotre objectif est simple : créer une communauté où chacun peut discuter, jouer, rencontrer de nouvelles personnes et passer un bon moment dans une ambiance conviviale.\n\nMerci de respecter les quelques règles suivantes.',
+        color: BOT_COLORS.default,
+        thumbnail: 'https://cdn.discordapp.com/embed/avatars/0.png',
+        image: 'attachment://reglement.png',
+        footer: 'Elysium • Règlement'
+      })
+        .addFields(
+          { name: '🤝 • Respect', value: '• Respectez tous les membres du serveur.\n• Les insultes, le harcèlement, les discriminations et les provocations répétées n’ont pas leur place sur Elysium.' },
+          { name: '💬 • Utilisez les bons salons', value: '• Merci d’envoyer vos messages dans le salon correspondant.\n• Prenez quelques secondes pour vérifier où vous écrivez afin de garder le serveur organisé.' },
+          { name: '📢 • Spam & Publicité', value: '• Le spam, le flood et les mentions abusives sont interdits.\n• Toute publicité ou recrutement pour un autre serveur est interdit sans l’accord d’un membre du staff.' },
+          { name: '🖼️ • Contenus', value: 'Merci de ne pas partager :\n• Des contenus choquants ou inappropriés.\n• Des contenus à caractère sexuel.\n• Des liens malveillants ou destinés à nuire aux autres membres.' },
+          { name: '🎙️ • Salons vocaux', value: '• Respectez les personnes présentes.\n• Évitez les cris, les nuisances sonores et les comportements dérangeants.' },
+          { name: '💡 • Suggestions', value: 'Une idée pour améliorer Elysium ?\nN’hésitez pas à utiliser le salon <#1533505450690085036>.' },
+          { name: '🌟 • L’esprit d’Elysium', value: 'Elysium est avant tout une communauté basée sur le respect, la bonne humeur et le partage.\nMerci de contribuer à faire d’Elysium un endroit agréable pour tous. 💙' }
+        )
+        .setImage('attachment://reglement.png');
+
+      return interaction.reply({ embeds: [embed], files: [attachment] });
+    }
+
+    default:
+      return interaction.reply({ content: 'Commande inconnue.', flags: ['Ephemeral'] });
+  }
+}
+
+// ─── EVENTS ────────────────────────────────────────────────────────
 client.once('ready', async () => {
   console.log(`Bot prêt : ${client.user.tag}`);
 
   await initMongo();
+
+  // Enregistrement des commandes slash
+  try {
+    if (guildId) {
+      const guild = client.guilds.cache.get(guildId) || await client.guilds.fetch(guildId).catch(() => null);
+      if (guild) {
+        await guild.commands.set(slashCommandsData);
+        console.log(`✅ Commandes slash enregistrées pour la guilde ${guild.name}`);
+      }
+    } else {
+      await client.application.commands.set(slashCommandsData);
+      console.log('✅ Commandes slash enregistrées globalement');
+    }
+  } catch (error) {
+    console.error('❌ Erreur lors de l’enregistrement des commandes slash :', error.message);
+  }
 
   if (guildId) {
     const guild = client.guilds.cache.get(guildId) || await client.guilds.fetch(guildId).catch(() => null);
@@ -653,6 +999,7 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
 });
 
 client.on('interactionCreate', async (interaction) => {
+  // Gestion du bouton claim
   if (interaction.isButton() && interaction.customId === 'claim_ticket') {
     const member = interaction.member;
     if (!member || (!isAdmin(member.user.id) && !hasStaffRole(member))) {
@@ -675,24 +1022,32 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  if (!interaction.isStringSelectMenu() || interaction.customId !== 'ticket_select') return;
+  // Gestion du menu de sélection de ticket
+  if (interaction.isStringSelectMenu() && interaction.customId === 'ticket_select') {
+    const ticketType = interaction.values[0];
+    const item = TICKET_CATEGORIES.find((cat) => cat.value === ticketType);
+    if (!item) {
+      await interaction.reply({ content: 'Impossible de trouver cette catégorie.', flags: ['Ephemeral'] });
+      return;
+    }
 
-  const ticketType = interaction.values[0];
-  const item = TICKET_CATEGORIES.find((cat) => cat.value === ticketType);
-  if (!item) {
-    await interaction.reply({ content: 'Impossible de trouver cette catégorie.', flags: ['Ephemeral'] });
+    await interaction.deferReply({ flags: ['Ephemeral'] });
+
+    const replies = TICKET_REPLIES[item.value] || ['Je prépare ton ticket…'];
+    const response = replies[Math.floor(Math.random() * replies.length)];
+    await interaction.editReply(`*${response}*`);
+
+    const member = interaction.member?.user || interaction.user;
+    const channel = await createTicketChannel(interaction.guild, member, item.label);
+    await interaction.followUp({ content: `Ton ticket a été ouvert : ${channel}`, flags: ['Ephemeral'] });
     return;
   }
 
-  await interaction.deferReply({ flags: ['Ephemeral'] });
-
-  const replies = TICKET_REPLIES[item.value] || ['Je prépare ton ticket…'];
-  const response = replies[Math.floor(Math.random() * replies.length)];
-  await interaction.editReply(`*${response}*`);
-
-  const member = interaction.member?.user || interaction.user;
-  const channel = await createTicketChannel(interaction.guild, member, item.label);
-  await interaction.followUp({ content: `Ton ticket a été ouvert : ${channel}`, flags: ['Ephemeral'] });
+  // Gestion des commandes slash
+  if (interaction.isChatInputCommand()) {
+    await handleSlashCommand(interaction);
+    return;
+  }
 });
 
 client.on('messageCreate', async (message) => {
@@ -747,62 +1102,44 @@ client.on('messageCreate', async (message) => {
   const { command, args } = parsed;
   if (!command) return;
 
-if (command === 'help') {
-  const embed = infoEmbed(
-    `${EMOJIS.help} Commandes du bot`,
-    `Préfixe utilisé : \`${prefix}\`\nVoici toutes les commandes disponibles pour gérer le serveur et ouvrir des tickets.`
-  );
+  if (command === 'help') {
+    const embed = infoEmbed(
+      `${EMOJIS.help} Commandes du bot`,
+      `Préfixe utilisé : \`${prefix}\`\nVoici toutes les commandes disponibles pour gérer le serveur et ouvrir des tickets.`
+    );
 
-  embed.addFields(
-    { name: '🛡️ Modération', value: '`+warn`, `+warnings`, `+ban`, `+kick`, `+purge`' },
-    { name: '🎟️ Tickets', value: '`+ticket <type>`, `+setup-ticket-panel`, `+close`' },
-    { name: '📜 Info', value: '`+rules`, `+test image`, `+test emoji`' }
-  );
+    embed.addFields(
+      { name: '🛡️ Modération', value: '`+warn`, `+warnings`, `+clearwarnings`, `+ban`, `+unban`, `+kick`, `+mute`, `+unmute`, `+purge`' },
+      { name: '🎟️ Tickets', value: '`+ticket <type>`, `+setup-ticket-panel`, `+close`' },
+      { name: '📜 Info', value: '`+rules`, `+test image`, `+test emoji`, `+rank`, `+level`, `+leaderboard`, `+top`, `+addlevel`' }
+    );
 
-  embed.setFooter({ text: 'Elysium • Commandes' });
-  await message.channel.send({ embeds: [embed] });
-  return;
-}
+    embed.setFooter({ text: 'Elysium • Commandes' });
+    await message.channel.send({ embeds: [embed] });
+    return;
+  }
 
   if (command === 'warn') {
-    if (!isAdmin(message.author.id)) {
-      await message.reply('Seules les personnes autorisées peuvent utiliser cette commande.');
-      return;
-    }
-
+    if (!isAdmin(message.author.id)) return;
     const target = message.mentions.members?.first() || (args[0] ? await message.guild.members.fetch(args[0]).catch(() => null) : null);
-    if (!target) {
-      await message.reply('Veuillez mentionner un utilisateur valide.');
-      return;
-    }
-
+    if (!target) return;
     const reason = args.slice(1).join(' ') || 'Aucune raison fournie';
     const updatedWarnings = addWarning(message.guild.id, target.id, message.author.id, reason);
-
-    const embed = warningEmbed(`${EMOJIS.warn} Warn ajouté`, `${target} a reçu un warn.`);
-    embed.addFields(
-      { name: 'Raison', value: reason, inline: true },
-      { name: 'Total', value: `${updatedWarnings.length}`, inline: true }
-    );
+    const embed = warningEmbed(`${EMOJIS.warn} Warn ajouté`, `${target} a reçu un warn.`)
+      .addFields(
+        { name: 'Raison', value: reason, inline: true },
+        { name: 'Total', value: `${updatedWarnings.length}`, inline: true }
+      );
     await message.channel.send({ embeds: [embed] });
     return;
   }
 
   if (command === 'warnings') {
-    if (!isAdmin(message.author.id)) {
-      await message.reply('Seules les personnes autorisées peuvent utiliser cette commande.');
-      return;
-    }
-
+    if (!isAdmin(message.author.id)) return;
     const target = message.mentions.members?.first() || (args[0] ? await message.guild.members.fetch(args[0]).catch(() => null) : null);
-    if (!target) {
-      await message.reply('Veuillez mentionner un utilisateur valide.');
-      return;
-    }
-
+    if (!target) return;
     const warnings = loadWarnings()[message.guild.id]?.[target.id] || [];
     const embed = infoEmbed(`${EMOJIS.warn} Warns de ${target.user.tag}`, warnings.length ? 'Voici les warns enregistrés :' : 'Aucun warn enregistré.');
-
     if (warnings.length) {
       warnings.forEach((warning, index) => {
         embed.addFields({
@@ -811,40 +1148,23 @@ if (command === 'help') {
         });
       });
     }
-
     await message.channel.send({ embeds: [embed] });
     return;
   }
 
   if (command === 'clearwarnings') {
-    if (!isAdmin(message.author.id)) {
-      await message.reply('Seules les personnes autorisées peuvent utiliser cette commande.');
-      return;
-    }
-
+    if (!isAdmin(message.author.id)) return;
     const target = message.mentions.members?.first() || (args[0] ? await message.guild.members.fetch(args[0]).catch(() => null) : null);
-    if (!target) {
-      await message.reply('Veuillez mentionner un utilisateur valide.');
-      return;
-    }
-
+    if (!target) return;
     clearWarnings(message.guild.id, target.id);
     await message.reply(`Les warns de ${target} ont été supprimés.`);
     return;
   }
 
   if (command === 'ban') {
-    if (!isAdmin(message.author.id)) {
-      await message.reply('Seules les personnes autorisées peuvent utiliser cette commande.');
-      return;
-    }
-
+    if (!isAdmin(message.author.id)) return;
     const target = message.mentions.members?.first() || (args[0] ? await message.guild.members.fetch(args[0]).catch(() => null) : null);
-    if (!target) {
-      await message.reply('Veuillez mentionner un utilisateur valide.');
-      return;
-    }
-
+    if (!target) return;
     const reason = args.slice(1).join(' ') || 'Aucune raison fournie';
     await target.ban({ reason });
     await message.channel.send(`${target.user.tag} a été banni. Raison : ${reason}`);
@@ -852,81 +1172,66 @@ if (command === 'help') {
   }
 
   if (command === 'unban') {
-    if (!isAdmin(message.author.id)) {
-      await message.reply('Seules les personnes autorisées peuvent utiliser cette commande.');
-      return;
-    }
-
+    if (!isAdmin(message.author.id)) return;
     const userId = args[0];
-    if (!userId) {
-      await message.reply('Veuillez fournir un ID utilisateur.');
-      return;
-    }
-
+    if (!userId) return;
     try {
       await message.guild.members.unban(userId);
       await message.channel.send(`L’utilisateur ${userId} a été débanni.`);
     } catch {
-      await message.reply('Impossible de débannir cet utilisateur.');
+      return;
     }
     return;
   }
 
   if (command === 'kick') {
-    if (!isAdmin(message.author.id)) {
-      await message.reply('Seules les personnes autorisées peuvent utiliser cette commande.');
-      return;
-    }
-
+    if (!isAdmin(message.author.id)) return;
     const target = message.mentions.members?.first() || (args[0] ? await message.guild.members.fetch(args[0]).catch(() => null) : null);
-    if (!target) {
-      await message.reply('Veuillez mentionner un utilisateur valide.');
-      return;
-    }
-
+    if (!target) return;
     const reason = args.slice(1).join(' ') || 'Aucune raison fournie';
     await target.kick(reason);
     await message.channel.send(`${target.user.tag} a été expulsé. Raison : ${reason}`);
     return;
   }
 
+  if (command === 'mute') {
+    if (!isAdmin(message.author.id)) return;
+    const target = message.mentions.members?.first() || (args[0] ? await message.guild.members.fetch(args[0]).catch(() => null) : null);
+    if (!target) return;
+    const durationString = args[1];
+    if (!durationString) return;
+    const duration = parseDuration(durationString);
+    if (!duration) return;
+    const reason = args.slice(2).join(' ') || 'Aucune raison fournie';
+    await target.timeout(duration, reason);
+    await message.channel.send(`${target} a été rendu muet pendant ${durationString}. Raison : ${reason}`);
+    return;
+  }
+
+  if (command === 'unmute') {
+    if (!isAdmin(message.author.id)) return;
+    const target = message.mentions.members?.first() || (args[0] ? await message.guild.members.fetch(args[0]).catch(() => null) : null);
+    if (!target) return;
+    await target.timeout(null, 'Unmute');
+    await message.channel.send(`${target} n’est plus muet.`);
+    return;
+  }
+
   if (command === 'purge') {
-    if (!isAdmin(message.author.id)) {
-      await message.reply('Seules les personnes autorisées peuvent utiliser cette commande.');
-      return;
-    }
-
-    if (!message.channel.permissionsFor(message.guild.members.me).has(PermissionFlagsBits.ManageMessages)) {
-      await message.reply('Le bot n’a pas la permission de gérer les messages dans ce salon.');
-      return;
-    }
-
+    if (!isAdmin(message.author.id)) return;
+    if (!message.channel.permissionsFor(message.guild.members.me).has(PermissionFlagsBits.ManageMessages)) return;
     const requestedCount = Number.parseInt(args[0], 10);
     const deletedCount = await purgeChannel(message.channel, Number.isNaN(requestedCount) ? null : requestedCount);
-
-    const userMessage = `Purge effectuée dans ${message.channel}.\nMessages supprimés : ${deletedCount}.`;
-    try {
-      await message.author.send(userMessage);
-    } catch {
-      await message.reply('La purge est faite, mais le message de confirmation n’a pas pu être envoyé en MP.');
-    }
-
-    await message.reply(`Purge terminée. ${deletedCount} message(s) supprimé(s).`);
+    await message.channel.send(`Purge terminée. ${deletedCount} message(s) supprimé(s).`);
     return;
   }
 
   if (command === 'setup-ticket-panel') {
-    if (!isAdmin(message.author.id)) {
-      await message.reply('Seules les personnes autorisées peuvent utiliser cette commande.');
-      return;
-    }
-
+    if (!isAdmin(message.author.id)) return;
     const panelChannel = message.channel;
     const embed = infoEmbed(`${EMOJIS.categories} Panel de tickets`, 'Choisis un type de ticket et un salon sera créé automatiquement pour toi. Les admins pourront répondre directement.')
       .setFooter({ text: 'Elysium • Ticket System' });
-
     const sent = await panelChannel.send({ embeds: [embed] });
-
     const panels = loadTicketPanels();
     panels[message.guild.id] = sent.id;
     saveTicketPanels(panels);
@@ -970,11 +1275,7 @@ if (command === 'help') {
 
   if (command === 'rank' || command === 'level') {
     const target = message.mentions.members?.first()?.user || (args[0] ? (await client.users.fetch(args[0]).catch(() => null)) : message.author);
-    if (!target) {
-      await message.reply('Utilisateur introuvable.');
-      return;
-    }
-
+    if (!target) return;
     await initMongo();
     const userData = await getUserLevelData(message.guild.id, target.id);
     const currentLevel = userData.level || 1;
@@ -1014,7 +1315,7 @@ if (command === 'help') {
     }
 
     if (topUsers.length === 0) {
-      await message.reply('Aucun classement disponible pour l\'instant.');
+      await message.reply('Aucun classement disponible pour l’instant.');
       return;
     }
 
@@ -1031,23 +1332,11 @@ if (command === 'help') {
   }
 
   if (command === 'addlevel') {
-    if (!isAdmin(message.author.id)) {
-      await message.reply('Seules les personnes autorisées peuvent utiliser cette commande.');
-      return;
-    }
-
+    if (!isAdmin(message.author.id)) return;
     const target = message.mentions.members?.first() || (args[0] ? await message.guild.members.fetch(args[0]).catch(() => null) : null);
-    if (!target) {
-      await message.reply('Veuillez mentionner un utilisateur valide.');
-      return;
-    }
-
+    if (!target) return;
     const levelsToAdd = Number.parseInt(args[1], 10);
-    if (Number.isNaN(levelsToAdd) || levelsToAdd < 1) {
-      await message.reply('Veuillez fournir un nombre de niveaux valide (minimum 1).');
-      return;
-    }
-
+    if (Number.isNaN(levelsToAdd) || levelsToAdd < 1) return;
     await initMongo();
     const userData = await getUserLevelData(message.guild.id, target.id);
     userData.level = (userData.level || 1) + levelsToAdd;
@@ -1061,23 +1350,14 @@ if (command === 'help') {
   }
 
   if (command === 'close') {
-    if (!message.channel.name.startsWith('ticket-')) {
-      await message.reply('Cette commande ne fonctionne que dans un salon de ticket.');
-      return;
-    }
-
+    if (!message.channel.name.startsWith('ticket-')) return;
     appendTicketTranscript(message.channel, `[${new Date().toISOString()}] SYSTEM: Ticket fermé par ${message.author.tag}`);
     await message.channel.delete();
     return;
   }
 
-
   if (command === 'rules') {
-    if (!isAdmin(message.author.id)) {
-      await message.reply('Seules les personnes autorisées peuvent utiliser cette commande.');
-      return;
-    }
-
+    if (!isAdmin(message.author.id)) return;
     const attachment = new AttachmentBuilder(path.join(__dirname, 'assets', 'reglement.png')).setName('reglement.png');
     const embed = buildEmbed({
       title: '🌌 • Règlement d’Elysium',
@@ -1102,7 +1382,7 @@ if (command === 'help') {
     return;
   }
 
-  await message.reply(`Commande inconnue. Tapez +help pour voir la liste.`);
+  // Aucune réponse pour commande inconnue
 });
 
 const port = Number(process.env.PORT) || 3000;

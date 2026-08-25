@@ -102,14 +102,10 @@ const LEVEL_CHANNEL_ID = process.env.LEVEL_CHANNEL_ID || '1533511740183019550';
 const LEVEL_IMAGE_NAME = 'lvl.png';
 const XP_MIN_PER_MESSAGE = 5;
 const XP_MAX_PER_MESSAGE = 9;
-const SPAM_THRESHOLD = 5;
-const SPAM_WINDOW = 10_000; // 10 secondes
-const SPAM_MUTE_DURATION = 60_000; // 1 minute
 const AUTO_DELETE_CHANNEL_ID = process.env.AUTO_DELETE_CHANNEL_ID || '1533505601773113456';
 const MONGO_URI = (process.env.MONGO_URI || '').trim();
 const DB_NAME = (process.env.DB_NAME || 'elysium_bot').trim();
 const LEVELS_COLLECTION = 'levels';
-const spamRecords = new Map();
 const lastMessageByChannel = new Map();
 const xpCooldowns = new Set();
 const COOLDOWN_TIME = 60_000;
@@ -898,7 +894,6 @@ async function handleSlashCommand(interaction) {
       userData.level = (userData.level || 1) + levelsToAdd;
       await saveUserLevelData(guild.id, target.id, userData);
 
-      // Attribution du rôle de niveau (immédiatement)
       const targetMember = await guild.members.fetch(target.id).catch(() => null);
       if (targetMember) {
         await assignLevelRole(guild, targetMember, userData.level);
@@ -1009,11 +1004,9 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
   });
 });
 
-// NOUVEAU : Log des suppressions de messages
 client.on('messageDelete', async (message) => {
   if (!message.guild || message.author?.bot) return;
 
-  // Si le message a été supprimé en masse (purge), le contenu peut être null
   const content = message.content || (message.attachments?.size ? `[pièce jointe: ${message.attachments.map(a => a.name).join(', ')}]` : 'Contenu indisponible (suppression en masse)');
 
   await sendLog(message.guild, 'delete', {
@@ -1089,34 +1082,6 @@ client.on('messageCreate', async (message) => {
       await previous.delete().catch(() => {});
     }
     lastMessageByChannel.set(message.channel.id, message);
-  }
-
-  const member = await message.guild.members.fetch(message.author.id).catch(() => null);
-  if (member && !member.permissions.has(PermissionFlagsBits.Administrator)) {
-    const now = Date.now();
-    const data = spamRecords.get(message.author.id) || { count: 0, last: 0 };
-
-    if (now - data.last > SPAM_WINDOW) {
-      data.count = 1;
-    } else {
-      data.count += 1;
-    }
-
-    data.last = now;
-    spamRecords.set(message.author.id, data);
-
-    if (data.count >= SPAM_THRESHOLD) {
-      try {
-        await member.timeout(SPAM_MUTE_DURATION, 'Spam détecté');
-        const embed = errorEmbed(`${EMOJIS.error} Mute automatique`, `${member} a été mis en timeout pendant 1 minute pour spam.`)
-          .setFooter({ text: 'Elysium • Anti-spam' });
-        await message.channel.send({ embeds: [embed] });
-      } catch (error) {
-        // silently ignore timeout errors if bot permissions are insufficient
-      }
-      spamRecords.delete(message.author.id);
-      return;
-    }
   }
 
   await processLevel(message);
@@ -1367,7 +1332,6 @@ client.on('messageCreate', async (message) => {
     userData.level = (userData.level || 1) + levelsToAdd;
     await saveUserLevelData(message.guild.id, target.id, userData);
 
-    // Attribution immédiate du rôle de niveau
     await assignLevelRole(message.guild, target, userData.level);
 
     const embed = successEmbed(`${EMOJIS.success} Niveaux ajoutés`, `${target} a reçu **+${levelsToAdd}** niveau(x) !\n\n**Nouveau niveau :** ${userData.level}`)
@@ -1409,8 +1373,6 @@ client.on('messageCreate', async (message) => {
     await message.channel.send({ embeds: [embed], files: [attachment] });
     return;
   }
-
-  // Aucune réponse pour commande inconnue
 });
 
 const port = Number(process.env.PORT) || 3000;

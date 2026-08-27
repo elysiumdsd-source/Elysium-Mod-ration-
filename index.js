@@ -675,6 +675,11 @@ const slashCommandsData = [
     .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre concerné').setRequired(true))
     .addIntegerOption(opt => opt.setName('niveaux').setDescription('Nombre de niveaux à ajouter').setRequired(true)),
   new SlashCommandBuilder()
+    .setName('removelevel')
+    .setDescription('Retirer des niveaux à un membre (admin)')
+    .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre concerné').setRequired(true))
+    .addIntegerOption(opt => opt.setName('niveaux').setDescription('Nombre de niveaux à retirer').setRequired(true)),
+  new SlashCommandBuilder()
     .setName('rules')
     .setDescription('Envoyer le règlement du serveur')
 ];
@@ -702,7 +707,7 @@ function getTargetUser(interaction) {
 async function handleSlashCommand(interaction) {
   const { commandName, options, member, guild, user } = interaction;
 
-  const adminCommands = ['warn', 'warnings', 'clearwarnings', 'ban', 'unban', 'kick', 'mute', 'unmute', 'purge', 'addlevel', 'rules'];
+  const adminCommands = ['warn', 'warnings', 'clearwarnings', 'ban', 'unban', 'kick', 'mute', 'unmute', 'purge', 'addlevel', 'removelevel', 'rules'];
   if (adminCommands.includes(commandName) && !isAdmin(user.id) && !hasStaffRole(member)) {
     return interaction.reply({ content: 'Vous n’avez pas la permission d’utiliser cette commande.', flags: ['Ephemeral'] });
   }
@@ -713,7 +718,7 @@ async function handleSlashCommand(interaction) {
         .addFields(
           { name: '🛡️ Modération', value: '`/warn`, `/warnings`, `/clearwarnings`, `/ban`, `/unban`, `/kick`, `/mute`, `/unmute`, `/purge`' },
           { name: '🎟️ Tickets', value: '`/ticket`, `/setup-ticket-panel`' },
-          { name: '📜 Info', value: '`/rules`, `/rank`, `/level`, `/leaderboard`, `/top`, `/addlevel`' }
+          { name: '📜 Info', value: '`/rules`, `/rank`, `/level`, `/leaderboard`, `/top`, `/addlevel`, `/removelevel`' }
         )
         .setFooter({ text: 'Elysium • Commandes' });
       return interaction.reply({ embeds: [embed] });
@@ -900,6 +905,28 @@ async function handleSlashCommand(interaction) {
       }
 
       const embed = successEmbed(`${EMOJIS.success} Niveaux ajoutés`, `${target} a reçu **+${levelsToAdd}** niveau(x) !\n\n**Nouveau niveau :** ${userData.level}`)
+        .setThumbnail(target.displayAvatarURL({ dynamic: true }));
+      return interaction.reply({ embeds: [embed] });
+    }
+
+    case 'removelevel': {
+      const target = options.getUser('utilisateur', true);
+      const levelsToRemove = options.getInteger('niveaux', true);
+      if (levelsToRemove < 1) return interaction.reply({ content: 'Le nombre de niveaux doit être supérieur à 0.', flags: ['Ephemeral'] });
+      await initMongo();
+      const userData = await getUserLevelData(guild.id, target.id);
+      const newLevel = Math.max(1, (userData.level || 1) - levelsToRemove);
+      userData.level = newLevel;
+      // Optionnel : on remet l'XP à 0 pour ne pas avoir d'incohérence
+      userData.xp = 0;
+      await saveUserLevelData(guild.id, target.id, userData);
+
+      const targetMember = await guild.members.fetch(target.id).catch(() => null);
+      if (targetMember) {
+        await assignLevelRole(guild, targetMember, newLevel);
+      }
+
+      const embed = warningEmbed(`${EMOJIS.warn} Niveaux retirés`, `${target} a perdu **${levelsToRemove}** niveau(x).\n\n**Nouveau niveau :** ${newLevel}`)
         .setThumbnail(target.displayAvatarURL({ dynamic: true }));
       return interaction.reply({ embeds: [embed] });
     }
@@ -1101,7 +1128,7 @@ client.on('messageCreate', async (message) => {
     embed.addFields(
       { name: '🛡️ Modération', value: '`+warn`, `+warnings`, `+clearwarnings`, `+ban`, `+unban`, `+kick`, `+mute`, `+unmute`, `+purge`' },
       { name: '🎟️ Tickets', value: '`+ticket <type>`, `+setup-ticket-panel`, `+close`' },
-      { name: '📜 Info', value: '`+rules`, `+test image`, `+test emoji`, `+rank`, `+level`, `+leaderboard`, `+top`, `+addlevel`' }
+      { name: '📜 Info', value: '`+rules`, `+test image`, `+test emoji`, `+rank`, `+level`, `+leaderboard`, `+top`, `+addlevel`, `+removelevel`' }
     );
 
     embed.setFooter({ text: 'Elysium • Commandes' });
@@ -1335,6 +1362,28 @@ client.on('messageCreate', async (message) => {
     await assignLevelRole(message.guild, target, userData.level);
 
     const embed = successEmbed(`${EMOJIS.success} Niveaux ajoutés`, `${target} a reçu **+${levelsToAdd}** niveau(x) !\n\n**Nouveau niveau :** ${userData.level}`)
+      .setThumbnail(target.displayAvatarURL({ dynamic: true }));
+
+    await message.channel.send({ embeds: [embed] });
+    return;
+  }
+
+  if (command === 'removelevel') {
+    if (!isAdmin(message.author.id)) return;
+    const target = message.mentions.members?.first() || (args[0] ? await message.guild.members.fetch(args[0]).catch(() => null) : null);
+    if (!target) return;
+    const levelsToRemove = Number.parseInt(args[1], 10);
+    if (Number.isNaN(levelsToRemove) || levelsToRemove < 1) return;
+    await initMongo();
+    const userData = await getUserLevelData(message.guild.id, target.id);
+    const newLevel = Math.max(1, (userData.level || 1) - levelsToRemove);
+    userData.level = newLevel;
+    userData.xp = 0;
+    await saveUserLevelData(message.guild.id, target.id, userData);
+
+    await assignLevelRole(message.guild, target, newLevel);
+
+    const embed = warningEmbed(`${EMOJIS.warn} Niveaux retirés`, `${target} a perdu **${levelsToRemove}** niveau(x).\n\n**Nouveau niveau :** ${newLevel}`)
       .setThumbnail(target.displayAvatarURL({ dynamic: true }));
 
     await message.channel.send({ embeds: [embed] });

@@ -109,6 +109,13 @@ client.once(Events.ClientReady, async () => {
     new SlashCommandBuilder().setName('inventaire').setDescription('Voir ton inventaire.'),
     new SlashCommandBuilder().setName('afk').setDescription('Aller en zone AFK pour gagner des Aure.'),
     new SlashCommandBuilder().setName('trade').setDescription('Échanger des objets avec un autre membre').addUserOption(opt => opt.setName('membre').setDescription('Le membre avec qui échanger').setRequired(true)),
+    new SlashCommandBuilder().setName('removedette').setDescription('[ADMIN] Retirer les dettes d\'un membre.')
+      .addUserOption(opt => opt.setName('membre').setDescription('Le membre dont on retire les dettes.').setRequired(true))
+      .addStringOption(opt => opt.setName('le_quel').setDescription('Quelle dette ? Tout ou un nombre précis.').setRequired(true).addChoices(
+        { name: 'Tout', value: 'tout' },
+        { name: 'Nombre', value: 'nombre' }
+      ))
+      .addIntegerOption(opt => opt.setName('montant').setDescription('Le montant à retirer (si "Nombre").').setRequired(false)),
     new SlashCommandBuilder().setName('pileouface').setDescription('Jouer à pile ou face contre un membre.').addUserOption(opt => opt.setName('adversaire').setDescription('Adversaire.').setRequired(true)).addIntegerOption(opt => opt.setName('mise').setDescription('Mise en Élys.').setRequired(true)),
     new SlashCommandBuilder().setName('bingo').setDescription('Lance un bingo avec une récompense personnalisée').addStringOption(opt => opt.setName('recompense').setDescription('Description de la récompense').setRequired(true)).addIntegerOption(opt => opt.setName('duree').setDescription('Durée en secondes (défaut 60)').setRequired(false)),
     new SlashCommandBuilder().setName('cooldowns').setDescription('Voir tes cooldowns.'),
@@ -171,7 +178,8 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
       console.error(`Erreur pour ${power.name}:`, error);
     }
   }
-});client.on(Events.InteractionCreate, async (interaction) => {
+});
+client.on(Events.InteractionCreate, async (interaction) => {
   // --- Gestion du Trade interactif (corrigé) ---
   if (interaction.isButton() && interaction.customId.startsWith('trade_')) {
     const parts = interaction.customId.split('_');
@@ -399,6 +407,7 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
 
     if (interaction.customId.startsWith('mine_auto_')) {
       if (!isLeader) return interaction.reply({ content: "Seul le leader peut activer l'auto-mine.", flags: MessageFlags.Ephemeral });
+      // CORRECTION DU BUG : on utilise interaction.user.id, pas la variable userId mal découpée
       const hasPass = await economy.getAutoMinePass(interaction.user.id);
       if (!hasPass) return interaction.reply({ content: "Auto-Mine Pass requis.", flags: MessageFlags.Ephemeral });
       session.autoMine = !session.autoMine;
@@ -505,7 +514,8 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
           { name: 'Infos', value: '`/cooldowns` : Cooldowns.\n`/etat` : Ton état.\n`/historique` : Transactions.\n`/stats` : Statistiques.', inline: false },
           { name: 'Pouvoirs', value: '`/seirei`, `/kama @cible`, `/tsuiseki @adv <mise>`, `/ishii @source @cible`, `/bunri`, `/fuuin`, `/yoroi`, `/honoo @cible`, `/konton`, `/anarchie_mute`, `/hanamai`', inline: false },
           { name: 'AFK', value: '`/afk` : Zone AFK (20 Aure / 30 sec, max 5h/jour).', inline: false },
-          { name: 'Trade', value: '`/trade @membre` : Échanger des objets avec un autre membre.', inline: false }
+          { name: 'Trade', value: '`/trade @membre` : Échanger des objets avec un autre membre.', inline: false },
+          { name: 'Admin', value: '`/resetcd @membre` : Réinitialiser les cooldowns.\n`/removedette @membre <tout/nombre> [montant]` : Retirer une dette.', inline: false }
         ).setFooter({ text: 'Pour plus d\'aide, contacte un administrateur.' }).setTimestamp();
       return interaction.reply({ embeds: [embed] });
     }
@@ -549,11 +559,8 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
         return interaction.reply({ embeds: [createEmbed('Solde', `Cash : ${cash} Élys\nBanque : ${bank} Élys`)] });
       }
       if (sub === 'pret') {
-        // Vérifier qu'il n'y a pas déjà un prêt en cours
         const existingLoans = await economy.getLoans(user.id);
-        if (existingLoans.length > 0) {
-          return interaction.reply({ embeds: [createEmbed('Erreur', 'Tu as déjà un prêt en cours ! Rembourse-le avant d\'en demander un nouveau.')], flags: MessageFlags.Ephemeral });
-        }
+        if (existingLoans.length > 0) return interaction.reply({ embeds: [createEmbed('Erreur', 'Tu as déjà un prêt en cours ! Rembourse-le avant d\'en demander un nouveau.')], flags: MessageFlags.Ephemeral });
         const jours = options.getInteger('jours');
         if (!jours || jours <= 0) return interaction.reply({ embeds: [createEmbed('Erreur', 'Durée invalide.')], flags: MessageFlags.Ephemeral });
         if (jours > 2) return interaction.reply({ embeds: [createEmbed('Erreur', 'La durée maximale de remboursement est de 2 jours.')], flags: MessageFlags.Ephemeral });
@@ -571,17 +578,14 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
       if (sub === 'rembourser') {
         const loans = await economy.getLoans(user.id);
         if (!loans.length) return interaction.reply({ embeds: [createEmbed('Erreur', 'Tu n\'as aucune dette à rembourser.')], flags: MessageFlags.Ephemeral });
-        const loan = loans[0];
-        const debt = loan.remaining;
+        const loan = loans[0]; const debt = loan.remaining;
         const cash = await economy.getBalance(user.id);
         if (montant <= 0) return interaction.reply({ embeds: [createEmbed('Erreur', 'Montant invalide.')], flags: MessageFlags.Ephemeral });
         if (cash < montant) return interaction.reply({ embeds: [createEmbed('Erreur', `Tu n'as pas assez de cash pour rembourser ${montant} Élys.`)], flags: MessageFlags.Ephemeral });
-
         const actualPayment = Math.min(montant, debt);
         await economy.repayLoan(user.id, 0, actualPayment);
         await economy.addBalance(user.id, -actualPayment);
         await economy.addTransaction(user.id, 'Remboursement prêt', -actualPayment);
-
         const remainingDebt = debt - actualPayment;
         if (remainingDebt <= 0) {
           return interaction.reply({ embeds: [createEmbed('Remboursé', `Tu as remboursé ${actualPayment} Élys. Toute ta dette est soldée ! <a:VerifFonda:1533806937282449559>`)] });
@@ -702,6 +706,35 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
       if (!tm) return interaction.reply({ embeds: [createEmbed('Erreur', 'Membre introuvable.')], flags: MessageFlags.Ephemeral });
       await CooldownModel.deleteMany({ userId: tu.id }); await logAction(guild, `${user.tag} a réinitialisé les cooldowns de ${tu.tag}.`);
       return interaction.reply({ embeds: [createEmbed('Cooldowns réinitialisés', `Les cooldowns de ${tm} ont été réinitialisés.`)] });
+    }
+
+    // --- Commande Admin : Remove dette ---
+    if (commandName === 'removedette') {
+      if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        return interaction.reply({ embeds: [createEmbed('Erreur', 'Seuls les administrateurs peuvent utiliser cette commande.')], flags: MessageFlags.Ephemeral });
+      }
+      const target = options.getUser('membre');
+      const targetMember = guild.members.cache.get(target.id);
+      if (!targetMember) return interaction.reply({ embeds: [createEmbed('Erreur', 'Membre introuvable.')], flags: MessageFlags.Ephemeral });
+
+      const leQuel = options.getString('le_quel');
+      const montant = options.getInteger('montant');
+      const loans = await economy.getLoans(target.id);
+
+      if (!loans.length) return interaction.reply({ embeds: [createEmbed('Erreur', `${target} n'a aucune dette.`)], flags: MessageFlags.Ephemeral });
+
+      const loan = loans[0]; // Un seul prêt à la fois
+      const currentDebt = loan.remaining;
+
+      if (leQuel === 'tout') {
+        await economy.repayLoan(target.id, 0, currentDebt);
+        return interaction.reply({ embeds: [createEmbed('Dette retirée', `Toutes les dettes de ${target} ont été retirées (${currentDebt} Élys). <a:VerifFonda:1533806937282449559>`)] });
+      } else if (leQuel === 'nombre') {
+        if (!montant || montant <= 0) return interaction.reply({ embeds: [createEmbed('Erreur', 'Montant invalide.')], flags: MessageFlags.Ephemeral });
+        if (montant > currentDebt) return interaction.reply({ embeds: [createEmbed('Erreur', `Le montant dépasse la dette totale (${currentDebt} Élys).`)], flags: MessageFlags.Ephemeral });
+        await economy.repayLoan(target.id, 0, montant);
+        return interaction.reply({ embeds: [createEmbed('Dette retirée', `${montant} Élys ont été retirés de la dette de ${target}. Reste : ${currentDebt - montant} Élys. <a:VerifFonda:1533806937282449559>`)] });
+      }
     }
 
     if (commandName === 'cooldowns') {

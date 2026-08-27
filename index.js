@@ -30,6 +30,8 @@ const afkIntervals = new Map();
 const miningInvites = new Map();
 const miningTeams = new Map();
 const activeTrades = new Map();
+const serverEventMonsters = new Map(); // Pour les boss/Aure des événements
+const eventVotes = new Map(); // Pour les votes Oui/Non
 
 function createEmbed(title, description, color = config.embedColor) {
   return new EmbedBuilder().setColor(color).setTitle(title).setDescription(description).setTimestamp();
@@ -116,6 +118,16 @@ client.once(Events.ClientReady, async () => {
         { name: 'Nombre', value: 'nombre' }
       ))
       .addIntegerOption(opt => opt.setName('montant').setDescription('Le montant à retirer (si "Nombre").').setRequired(false)),
+    new SlashCommandBuilder().setName('evenement').setDescription('Lancer un événement spécial')
+      .addIntegerOption(opt => opt.setName('numero').setDescription('Le numéro de l\'événement (1 à 6)').setRequired(true)
+        .addChoices(
+          { name: '1 - Prévention', value: 1 },
+          { name: '2 - Spawn Aure', value: 2 },
+          { name: '3 - Boss KO', value: 3 },
+          { name: '4 - Choix Oui/Non', value: 4 },
+          { name: '5 - Taxe Royale', value: 5 },
+          { name: '6 - Boss Final', value: 6 }
+        )),
     new SlashCommandBuilder().setName('pileouface').setDescription('Jouer à pile ou face contre un membre.').addUserOption(opt => opt.setName('adversaire').setDescription('Adversaire.').setRequired(true)).addIntegerOption(opt => opt.setName('mise').setDescription('Mise en Élys.').setRequired(true)),
     new SlashCommandBuilder().setName('bingo').setDescription('Lance un bingo avec une récompense personnalisée').addStringOption(opt => opt.setName('recompense').setDescription('Description de la récompense').setRequired(true)).addIntegerOption(opt => opt.setName('duree').setDescription('Durée en secondes (défaut 60)').setRequired(false)),
     new SlashCommandBuilder().setName('cooldowns').setDescription('Voir tes cooldowns.'),
@@ -179,345 +191,427 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
     }
   }
 });
-
 client.on(Events.InteractionCreate, async (interaction) => {
-  // --- GESTION DU TRADE : MENU DÉROULANT (Corrigé ici !) ---
-  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('trade_select_')) {
-    const parts = interaction.customId.split('_');
-    const tradeId = parts[2];
-    const trade = activeTrades.get(tradeId);
-    if (!trade) return interaction.reply({ content: "Cet échange n'existe plus.", flags: MessageFlags.Ephemeral });
-
-    const isUser1 = interaction.user.id === trade.user1;
-    const isUser2 = interaction.user.id === trade.user2;
-    if (!isUser1 && !isUser2) return interaction.reply({ content: "Tu ne participes pas à cet échange.", flags: MessageFlags.Ephemeral });
-
-    const currentUserKey = isUser1 ? 'offer1' : 'offer2';
-    const currentValidKey = isUser1 ? 'validated1' : 'validated2';
-
-    const resKey = interaction.values[0];
-    const resInfo = miningData.resources[resKey];
-    const resCount = await economy.getResource(interaction.user.id, resKey);
-    if (resCount <= 0) return interaction.reply({ content: "Tu n'as pas ce matériau.", flags: MessageFlags.Ephemeral });
-
-    trade[currentUserKey].push({ type: 'materiaux', name: resInfo.name, value: 1, resourceKey: resKey });
-    trade[currentValidKey] = false;
-
-    const offer1Text = trade.offer1.length ? trade.offer1.map(i => `- ${i.name}`).join('\n') : '*(rien pour le moment)*';
-    const offer2Text = trade.offer2.length ? trade.offer2.map(i => `- ${i.name}`).join('\n') : '*(rien pour le moment)*';
-    const validationText = `Validation : <@${trade.user1}> ${trade.validated1 ? 'Validé' : 'en attente'} · <@${trade.user2}> ${trade.validated2 ? 'Validé' : 'en attente'}`;
-
-    const updatedEmbed = new EmbedBuilder()
-      .setColor('#3498db')
-      .setTitle('Échange')
-      .setDescription(`Chacun ajoute ce qu'il veut (Pioche, Matériaux) puis clique Valider.`)
-      .addFields(
-        { name: `<@${trade.user1}> donne`, value: offer1Text, inline: false },
-        { name: `<@${trade.user2}> donne`, value: offer2Text, inline: false },
-        { name: 'Validation', value: validationText, inline: false }
-      );
-
-    await interaction.update({ embeds: [updatedEmbed] });
-    return;
-  }
-
-  // --- GESTION DU TRADE : BOUTONS ---
-  if (interaction.isButton() && interaction.customId.startsWith('trade_')) {
-    const parts = interaction.customId.split('_');
-    const action = parts[1];
-    const tradeId = parts[2];
-    const trade = activeTrades.get(tradeId);
-    if (!trade) return interaction.reply({ content: "Cet échange n'existe plus.", flags: MessageFlags.Ephemeral });
-
-    const isUser1 = interaction.user.id === trade.user1;
-    const isUser2 = interaction.user.id === trade.user2;
-    if (!isUser1 && !isUser2) return interaction.reply({ content: "Tu ne participes pas à cet échange.", flags: MessageFlags.Ephemeral });
-
-    const currentUserKey = isUser1 ? 'offer1' : 'offer2';
-    const currentValidKey = isUser1 ? 'validated1' : 'validated2';
-
-    if (action === 'pickaxe') {
-      const pickLevel = await economy.getPickaxeLevel(interaction.user.id);
-      const pick = miningData.pickaxeLevels.find(p => p.level === pickLevel);
-      trade[currentUserKey] = trade[currentUserKey].filter(item => item.type !== 'pioche');
-      trade[currentUserKey].push({ type: 'pioche', name: pick.name, value: pick.level });
-      trade[currentValidKey] = false;
-    }
-
-    if (action === 'materials') {
-      const selectRow = new ActionRowBuilder().addComponents(
-        new StringSelectMenuBuilder().setCustomId(`trade_select_${tradeId}`).setPlaceholder('Choisis un matériau').addOptions(
-          Object.entries(miningData.resources).map(([key, res]) => new StringSelectMenuOptionBuilder().setLabel(res.name).setValue(key))
-        )
-      );
-      return interaction.reply({ content: 'Choisis un matériau à ajouter :', components: [selectRow], flags: MessageFlags.Ephemeral });
-    }
-
-    if (action === 'validate') {
-      trade[currentValidKey] = true;
-      if (trade.validated1 && trade.validated2) {
-        activeTrades.delete(tradeId);
-        for (const item of trade.offer1) {
-          if (item.type === 'pioche') await economy.setPickaxeLevel(trade.user2, item.value);
-          else if (item.type === 'materiaux') { await economy.removeResource(trade.user1, item.resourceKey, item.value); await economy.addResource(trade.user2, item.resourceKey, item.value); }
-        }
-        for (const item of trade.offer2) {
-          if (item.type === 'pioche') await economy.setPickaxeLevel(trade.user1, item.value);
-          else if (item.type === 'materiaux') { await economy.removeResource(trade.user2, item.resourceKey, item.value); await economy.addResource(trade.user1, item.resourceKey, item.value); }
-        }
-        return interaction.update({ content: 'Échange réussi !', embeds: [], components: [] });
-      } else {
-        return interaction.reply({ content: "Ton offre est validée ! Attends l'autre joueur.", flags: MessageFlags.Ephemeral });
-      }
-    }
-
-    if (action === 'cancel') {
-      activeTrades.delete(tradeId);
-      return interaction.update({ content: 'Échange annulé.', embeds: [], components: [] });
-    }
-
-    if (action === 'clear') {
-      trade[currentUserKey] = [];
-      trade[currentValidKey] = false;
-    }
-
-    const offer1Text = trade.offer1.length ? trade.offer1.map(i => `- ${i.name}`).join('\n') : '*(rien pour le moment)*';
-    const offer2Text = trade.offer2.length ? trade.offer2.map(i => `- ${i.name}`).join('\n') : '*(rien pour le moment)*';
-    const validationText = `Validation : <@${trade.user1}> ${trade.validated1 ? 'Validé' : 'en attente'} · <@${trade.user2}> ${trade.validated2 ? 'Validé' : 'en attente'}`;
-
-    const updatedEmbed = new EmbedBuilder()
-      .setColor('#3498db')
-      .setTitle('Échange')
-      .setDescription(`Chacun ajoute ce qu'il veut (Pioche, Matériaux) puis clique Valider.`)
-      .addFields(
-        { name: `<@${trade.user1}> donne`, value: offer1Text, inline: false },
-        { name: `<@${trade.user2}> donne`, value: offer2Text, inline: false },
-        { name: 'Validation', value: validationText, inline: false }
-      );
-
-    await interaction.update({ embeds: [updatedEmbed] });
-    return;
-  }
-
-  // --- MINE : SELECT MENU (choix difficulté) ---
-  if (interaction.isStringSelectMenu()) {
-    if (interaction.customId.startsWith('mine_select_')) {
-      const difficulty = interaction.values[0];
-      const userId = interaction.customId.split('_')[2];
-      if (interaction.user.id !== userId) return interaction.reply({ content: "Ce n'est pas ta session.", flags: MessageFlags.Ephemeral });
-      const diff = miningData.difficulties[difficulty];
-      if (!diff) return interaction.reply({ content: 'Difficulté inconnue.', flags: MessageFlags.Ephemeral });
-      const team = miningTeams.get(userId) || [];
-      miningTeams.delete(userId);
-      const floor = 1;
-      const hp = calculateOreHP(floor, difficulty);
-      const rewardMin = Math.floor(diff.minReward * (1 + floor * 0.1));
-      const rewardMax = Math.floor(diff.maxReward * (1 + floor * 0.1));
-      const reward = Math.floor(Math.random() * (rewardMax - rewardMin + 1)) + rewardMin;
-      const oreName = miningData.oreNames[difficulty][Math.floor(Math.random() * miningData.oreNames[difficulty].length)];
-      const session = { userId: interaction.user.id, difficulty, floor, currentOreName: oreName, currentOreHP: hp, currentOreMaxHP: hp, currentOreReward: reward, loot: [], autoMine: false, autoMineInterval: null, lastActionLog: [], message: null, teamMembers: team };
-      const pickaxeLevel = await economy.getPickaxeLevel(interaction.user.id);
-      const pickaxe = miningData.pickaxeLevels.find(p => p.level === pickaxeLevel) || { name: "Inconnue", rarity: "?", damageMin: 1, damageMax: 1 };
-      const embed = buildMineEmbed(session, pickaxe);
-      const row1 = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`mine_attack_${interaction.user.id}`).setLabel('Attaquer').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId(`mine_refresh_${interaction.user.id}`).setLabel('Actualiser').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId(`mine_loot_${interaction.user.id}`).setLabel('Butin').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId(`mine_claim_${interaction.user.id}`).setLabel('Récupérer').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId(`mine_auto_${interaction.user.id}`).setLabel('Auto').setStyle(ButtonStyle.Primary)
-      );
-      const row2 = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`mine_stop_${interaction.user.id}`).setLabel('Arrêter').setStyle(ButtonStyle.Danger));
-      const sentMessage = await interaction.channel.send({ embeds: [embed], components: [row1, row2] });
-      session.message = sentMessage;
-      miningSessions.set(sentMessage.id, session);
-      return interaction.reply({ embeds: [createEmbed('Session lancée', 'La session de minage a commencé.')], flags: MessageFlags.Ephemeral });
-    }
-    return;
-  }
-
-  // --- BOUTONS DE LA MINE ---
-  if (interaction.isButton()) {
-    const [action, userId] = interaction.customId.split('_');
-
-    if (interaction.customId.startsWith('mine_accept_') || interaction.customId.startsWith('mine_refuse_')) {
-      const parts = interaction.customId.split('_');
-      const type = parts[1];
-      const inviterId = parts[2];
-      const inviteeId = parts[3];
-      if (interaction.user.id !== inviteeId) return interaction.reply({ content: "Cette invitation ne t'est pas destinée.", flags: MessageFlags.Ephemeral });
-      const invite = miningInvites.get(inviteeId);
-      if (!invite) return interaction.reply({ content: "Cette invitation n'existe plus.", flags: MessageFlags.Ephemeral });
-      const inviter = await client.users.fetch(inviterId).catch(() => null);
-      if (!inviter) return interaction.reply({ content: "L'inviteur est introuvable.", flags: MessageFlags.Ephemeral });
-      if (type === 'accept') {
-        if (!miningTeams.has(inviterId)) miningTeams.set(inviterId, []);
-        const team = miningTeams.get(inviterId);
-        if (!team.includes(inviteeId)) team.push(inviteeId);
-        miningTeams.set(inviterId, team);
-        miningInvites.delete(inviteeId);
-        await interaction.update({ content: 'Invitation acceptée !', components: [] });
-        await inviter.send({ content: `${interaction.user} a accepté ton invitation pour la session de minage.` }).catch(() => {});
-      } else {
-        miningInvites.delete(inviteeId);
-        await interaction.update({ content: 'Invitation refusée.', components: [] });
-        await inviter.send({ content: `${interaction.user} a refusé ton invitation.` }).catch(() => {});
-      }
-      return;
-    }
-
-    const session = miningSessions.get(interaction.message.id);
-    if (!session) return interaction.reply({ content: "Cette session de minage est terminée.", flags: MessageFlags.Ephemeral });
-    const isLeader = interaction.user.id === session.userId;
-    const isTeamMember = session.teamMembers.includes(interaction.user.id);
-    if (!isLeader && !isTeamMember) return interaction.reply({ content: "Tu ne fais pas partie de cette session.", flags: MessageFlags.Ephemeral });
-
-    if (interaction.customId.startsWith('mine_attack_')) {
-      await interaction.deferUpdate();
-      try {
-        const attackerId = interaction.user.id;
-        const pickaxeLevel = await economy.getPickaxeLevel(attackerId);
-        const pickaxe = miningData.pickaxeLevels.find(p => p.level === pickaxeLevel) || { damageMin: 1, damageMax: 1, name: "Inconnue", rarity: "?" };
-        let damage = Math.floor(Math.random() * (pickaxe.damageMax - pickaxe.damageMin + 1)) + pickaxe.damageMin;
-        if (Math.random() < 0.1) { damage *= 2; session.lastActionLog.unshift('Coup critique !'); }
-        session.currentOreHP -= damage;
-        session.lastActionLog.unshift(`${interaction.user.username} a infligé ${damage} dégâts au ${session.currentOreName}.`);
-        if (session.currentOreHP <= 0) {
-          const reward = session.currentOreReward;
-          session.loot.push({ type: 'aure', name: 'Aure', amount: reward });
-          await economy.addAure(session.userId, reward);
-          session.lastActionLog.unshift(`${session.currentOreName} détruit ! ${reward} Aure ajoutées au butin.`);
-          for (const [resName, resData] of Object.entries(miningData.resources)) {
-            if (Math.random() < resData.dropChance) {
-              session.loot.push({ type: 'resource', name: resData.name, amount: 1 });
-              await economy.addResource(session.userId, resName, 1);
-              session.lastActionLog.unshift(`${resData.name} obtenu !`);
-            }
-          }
-          session.floor += 1;
-          if (session.floor > 50) session.floor = 50;
-          session.currentOreMaxHP = calculateOreHP(session.floor, session.difficulty);
-          session.currentOreHP = session.currentOreMaxHP;
-          const diff = miningData.difficulties[session.difficulty];
-          const rewardMin = Math.floor(diff.minReward * (1 + session.floor * 0.1));
-          const rewardMax = Math.floor(diff.maxReward * (1 + session.floor * 0.1));
-          session.currentOreReward = Math.floor(Math.random() * (rewardMax - rewardMin + 1)) + rewardMin;
-          session.currentOreName = miningData.oreNames[session.difficulty][Math.floor(Math.random() * miningData.oreNames[session.difficulty].length)];
-        }
-        const embed = buildMineEmbed(session, pickaxe);
-        if (session.message) await session.message.edit({ embeds: [embed] }).catch(() => {});
-      } catch (error) { console.error('Erreur bouton attaque mine:', error); }
-      return;
-    }
-
-    if (interaction.customId.startsWith('mine_refresh_')) {
-      await interaction.deferUpdate();
-      try {
-        const pickaxeLevel = await economy.getPickaxeLevel(interaction.user.id);
-        const pickaxe = miningData.pickaxeLevels.find(p => p.level === pickaxeLevel) || { damageMin: 1, damageMax: 1, name: "Inconnue", rarity: "?" };
-        const embed = buildMineEmbed(session, pickaxe);
-        if (session.message) await session.message.edit({ embeds: [embed] }).catch(() => {});
-      } catch (error) { console.error('Erreur bouton actualiser mine:', error); }
-      return;
-    }
-
-    if (interaction.customId.startsWith('mine_loot_')) {
-      const lootSummary = session.loot.map(item => `- ${item.name}: ${item.amount}`).join('\n') || 'Aucun butin.';
-      await interaction.reply({ embeds: [createEmbed('Butin actuel', lootSummary)], flags: MessageFlags.Ephemeral });
-      return;
-    }
-
-    if (interaction.customId.startsWith('mine_claim_')) {
-      if (!isLeader) return interaction.reply({ content: "Seul le leader peut récupérer le butin.", flags: MessageFlags.Ephemeral });
-      const lootSummary = session.loot.map(item => `- ${item.name}: ${item.amount}`).join('\n') || 'Aucun butin.';
-      try {
-        await interaction.user.send({ embeds: [createEmbed('Butin récupéré', lootSummary)] });
-        session.loot = [];
-        await interaction.reply({ content: 'Butin envoyé en MP.', flags: MessageFlags.Ephemeral });
-      } catch { await interaction.reply({ content: 'Impossible d\'envoyer le MP.', flags: MessageFlags.Ephemeral }); }
-      return;
-    }
-
-    if (interaction.customId.startsWith('mine_auto_')) {
-      if (!isLeader) return interaction.reply({ content: "Seul le leader peut activer l'auto-mine.", flags: MessageFlags.Ephemeral });
-      const hasPass = await economy.getAutoMinePass(interaction.user.id);
-      if (!hasPass) return interaction.reply({ content: "Auto-Mine Pass requis.", flags: MessageFlags.Ephemeral });
-      session.autoMine = !session.autoMine;
-      if (session.autoMine) {
-        session.autoMineInterval = setInterval(async () => {
-          try {
-            const pickaxeLevel = await economy.getPickaxeLevel(session.userId);
-            const pickaxe = miningData.pickaxeLevels.find(p => p.level === pickaxeLevel) || { damageMin: 1, damageMax: 1 };
-            let damage = Math.floor(Math.random() * (pickaxe.damageMax - pickaxe.damageMin + 1)) + pickaxe.damageMin;
-            session.currentOreHP -= damage;
-            session.lastActionLog.unshift(`[Auto] ${damage} dégâts.`);
-            if (session.currentOreHP <= 0) {
-              const reward = session.currentOreReward;
-              session.loot.push({ type: 'aure', name: 'Aure', amount: reward });
-              await economy.addAure(session.userId, reward);
-              for (const [resName, resData] of Object.entries(miningData.resources)) {
-                if (Math.random() < resData.dropChance) { session.loot.push({ type: 'resource', name: resData.name, amount: 1 }); await economy.addResource(session.userId, resName, 1); }
-              }
-              session.floor += 1;
-              session.currentOreMaxHP = calculateOreHP(session.floor, session.difficulty);
-              session.currentOreHP = session.currentOreMaxHP;
-              const diff = miningData.difficulties[session.difficulty];
-              const rewardMin = Math.floor(diff.minReward * (1 + session.floor * 0.1));
-              const rewardMax = Math.floor(diff.maxReward * (1 + session.floor * 0.1));
-              session.currentOreReward = Math.floor(Math.random() * (rewardMax - rewardMin + 1)) + rewardMin;
-              session.currentOreName = miningData.oreNames[session.difficulty][Math.floor(Math.random() * miningData.oreNames[session.difficulty].length)];
-            }
-            const embed = buildMineEmbed(session, pickaxe);
-            if (session.message) await session.message.edit({ embeds: [embed] }).catch(() => {});
-          } catch (error) { console.error('Erreur auto-mine:', error); clearInterval(session.autoMineInterval); session.autoMine = false; }
-        }, 5000);
-      } else { clearInterval(session.autoMineInterval); session.autoMineInterval = null; }
-      await interaction.reply({ content: `Auto-mine ${session.autoMine ? 'activé' : 'désactivé'}.`, flags: MessageFlags.Ephemeral });
-      return;
-    }
-
-    if (interaction.customId.startsWith('mine_stop_')) {
-      if (!isLeader) return interaction.reply({ content: "Seul le leader peut arrêter la session.", flags: MessageFlags.Ephemeral });
-      if (session.autoMineInterval) clearInterval(session.autoMineInterval);
-      miningSessions.delete(interaction.message.id);
-      if (session.message) await session.message.delete().catch(() => {});
-      await interaction.reply({ content: 'Session arrêtée.', flags: MessageFlags.Ephemeral });
-      return;
-    }
-
-    if (interaction.customId.startsWith('duel_')) {
-      const parts = interaction.customId.split('_');
-      const type = parts[1];
-      const challengerId = parts[2];
-      const targetId = parts[3];
-      const mise = parseInt(parts[4]);
-      if (interaction.user.id !== challengerId) return interaction.reply({ content: "Seul l'initiateur peut choisir.", flags: MessageFlags.Ephemeral });
-      const guild = interaction.guild;
-      const target = guild.members.cache.get(targetId);
-      if (!target) return interaction.reply({ content: "Cible introuvable.", flags: MessageFlags.Ephemeral });
-      const challengerTotal = await economy.getTotalBalance(challengerId);
-      const targetTotal = await economy.getTotalBalance(targetId);
-      if (challengerTotal < mise || targetTotal < mise) return interaction.update({ content: "Un des participants n'a plus assez de solde total.", embeds: [], components: [] });
-      const choice = type === 'pile' ? 0 : 1;
-      const result = Math.random() < 0.5 ? 0 : 1;
-      let winnerId, loserId;
-      if (choice === result) { winnerId = challengerId; loserId = targetId; } else { winnerId = targetId; loserId = challengerId; }
-      await economy.deductFromTotal(loserId, mise);
-      await economy.addToCash(winnerId, mise);
-      await economy.addTransaction(winnerId, `Traque gagnée contre ${target.user.username}`, mise);
-      await economy.addTransaction(loserId, `Traque perdue contre ${interaction.user.username}`, -mise);
-      await logAction(guild, `${interaction.user.username} a gagné ${mise} Élys contre ${target.user.username}`);
-      const resultEmbed = new EmbedBuilder().setColor('#f1c40f').setTitle('Résultat de la Traque').setDescription(`Le choix : ${choice === 0 ? 'Pile' : 'Face'}\nLe résultat : ${result === 0 ? 'Pile' : 'Face'}\n\n<@${winnerId}> gagne **${mise} Élys** !`).setTimestamp();
-      await interaction.update({ embeds: [resultEmbed], components: [] });
-      return;
-    }
-    return;
-  }if (!interaction.isChatInputCommand()) return;
-  if (interaction.guild.id !== config.guildId) return;
-
-  const { commandName, options, user, member, guild } = interaction;
-  await economy.incrementCommandUsage(user.id);
-
   try {
+    // --- GESTION DU TRADE : MENU DÉROULANT (CORRIGÉ) ---
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith('trade_select_')) {
+      const parts = interaction.customId.split('_');
+      const tradeId = parts[2];
+      let trade = activeTrades.get(tradeId);
+      if (!trade) {
+        const user = await economy.getUser(interaction.user.id);
+        trade = user.activeTrades.find(t => t.id === tradeId);
+        if (trade) activeTrades.set(tradeId, trade);
+      }
+      if (!trade) return interaction.reply({ content: "Cet échange n'existe plus.", flags: MessageFlags.Ephemeral });
+
+      const isUser1 = interaction.user.id === trade.user1;
+      const isUser2 = interaction.user.id === trade.user2;
+      if (!isUser1 && !isUser2) return interaction.reply({ content: "Tu ne participes pas à cet échange.", flags: MessageFlags.Ephemeral });
+
+      const currentUserKey = isUser1 ? 'offer1' : 'offer2';
+      const currentValidKey = isUser1 ? 'validated1' : 'validated2';
+
+      const resKey = interaction.values[0];
+      const resInfo = miningData.resources[resKey];
+      const resCount = await economy.getResource(interaction.user.id, resKey);
+      if (resCount <= 0) return interaction.reply({ content: "Tu n'as pas ce matériau.", flags: MessageFlags.Ephemeral });
+
+      trade[currentUserKey].push({ type: 'materiaux', name: resInfo.name, value: 1, resourceKey: resKey });
+      trade[currentValidKey] = false;
+
+      await updateTradeEmbed(interaction, trade);
+      return;
+    }
+
+    // --- GESTION DU TRADE : BOUTONS ---
+    if (interaction.isButton() && interaction.customId.startsWith('trade_')) {
+      const parts = interaction.customId.split('_');
+      const action = parts[1];
+      const tradeId = parts[2];
+      let trade = activeTrades.get(tradeId);
+      if (!trade) {
+        const user = await economy.getUser(interaction.user.id);
+        trade = user.activeTrades.find(t => t.id === tradeId);
+        if (trade) activeTrades.set(tradeId, trade);
+      }
+      if (!trade) return interaction.reply({ content: "Cet échange n'existe plus.", flags: MessageFlags.Ephemeral });
+
+      const isUser1 = interaction.user.id === trade.user1;
+      const isUser2 = interaction.user.id === trade.user2;
+      if (!isUser1 && !isUser2) return interaction.reply({ content: "Tu ne participes pas à cet échange.", flags: MessageFlags.Ephemeral });
+
+      const currentUserKey = isUser1 ? 'offer1' : 'offer2';
+      const currentValidKey = isUser1 ? 'validated1' : 'validated2';
+
+      if (action === 'pickaxe') {
+        const pickLevel = await economy.getPickaxeLevel(interaction.user.id);
+        const pick = miningData.pickaxeLevels.find(p => p.level === pickLevel);
+        trade[currentUserKey] = trade[currentUserKey].filter(item => item.type !== 'pioche');
+        trade[currentUserKey].push({ type: 'pioche', name: pick.name, value: pick.level });
+        trade[currentValidKey] = false;
+      }
+
+      if (action === 'materials') {
+        const selectRow = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder().setCustomId(`trade_select_${tradeId}`).setPlaceholder('Choisis un matériau').addOptions(
+            Object.entries(miningData.resources).map(([key, res]) => new StringSelectMenuOptionBuilder().setLabel(res.name).setValue(key))
+          )
+        );
+        return interaction.reply({ content: 'Choisis un matériau à ajouter :', components: [selectRow], flags: MessageFlags.Ephemeral });
+      }
+
+      if (action === 'validate') {
+        trade[currentValidKey] = true;
+        if (trade.validated1 && trade.validated2) {
+          activeTrades.delete(tradeId);
+          await economy.deleteSavedTrade(trade.user1, tradeId);
+          await economy.deleteSavedTrade(trade.user2, tradeId);
+          for (const item of trade.offer1) {
+            if (item.type === 'pioche') await economy.setPickaxeLevel(trade.user2, item.value);
+            else if (item.type === 'materiaux') { await economy.removeResource(trade.user1, item.resourceKey, item.value); await economy.addResource(trade.user2, item.resourceKey, item.value); }
+          }
+          for (const item of trade.offer2) {
+            if (item.type === 'pioche') await economy.setPickaxeLevel(trade.user1, item.value);
+            else if (item.type === 'materiaux') { await economy.removeResource(trade.user2, item.resourceKey, item.value); await economy.addResource(trade.user1, item.resourceKey, item.value); }
+          }
+          return interaction.update({ content: 'Échange réussi !', embeds: [], components: [] });
+        } else {
+          return interaction.reply({ content: "Ton offre est validée ! Attends l'autre joueur.", flags: MessageFlags.Ephemeral });
+        }
+      }
+
+      if (action === 'cancel') {
+        activeTrades.delete(tradeId);
+        await economy.deleteSavedTrade(trade.user1, tradeId);
+        await economy.deleteSavedTrade(trade.user2, tradeId);
+        return interaction.update({ content: 'Échange annulé.', embeds: [], components: [] });
+      }
+
+      if (action === 'clear') {
+        trade[currentUserKey] = [];
+        trade[currentValidKey] = false;
+      }
+
+      await updateTradeEmbed(interaction, trade);
+      return;
+    }
+
+    // --- BOUTONS DES ÉVÉNEMENTS (Spawn, Attaque, KO, Choix) ---
+    if (interaction.isButton() && interaction.customId.startsWith('event_')) {
+      // Attaque de l'Aure
+      if (interaction.customId === 'event_attack_aure') {
+        const monster = serverEventMonsters.get('aure');
+        if (!monster) return interaction.reply({ content: "L'Aure est déjà vaincu !", flags: MessageFlags.Ephemeral });
+        const pickLevel = await economy.getPickaxeLevel(interaction.user.id);
+        const pick = miningData.pickaxeLevels.find(p => p.level === pickLevel) || { damageMin: 1, damageMax: 1 };
+        const damage = Math.floor(Math.random() * (pick.damageMax - pick.damageMin + 1)) + pick.damageMin;
+        
+        monster.hp -= damage;
+        if (monster.hp <= 0) {
+          serverEventMonsters.delete('aure');
+          await economy.addBalance(interaction.user.id, monster.reward);
+          await interaction.update({ embeds: [createEmbed('💎 Victoire !', `L'Aure est vaincu ! ${interaction.user} gagne ${monster.reward} Élys !`)], components: [] });
+          return;
+        }
+        const embed = new EmbedBuilder().setColor('#FFA500').setTitle('💎 Aure sauvage')
+          .setDescription(`**PV :** ${monster.hp}/${monster.maxHp}\n\n**Récompense :** ${monster.reward} Élys`);
+        await interaction.update({ embeds: [embed] });
+        return;
+      }
+
+      // Attaque du Boss KO
+      if (interaction.customId === 'event_attack_boss_ko') {
+        const monster = serverEventMonsters.get('boss_ko');
+        if (!monster) return interaction.reply({ content: "Boss déjà vaincu !", flags: MessageFlags.Ephemeral });
+
+        const stunKey = `stun_${interaction.user.id}`;
+        if (Date.now() < (global[stunKey] || 0)) {
+          return interaction.reply({ content: "😵 Tu es KO ! Tu ne peux plus attaquer pendant 10 secondes.", flags: MessageFlags.Ephemeral });
+        }
+
+        const pickLevel = await economy.getPickaxeLevel(interaction.user.id);
+        const pick = miningData.pickaxeLevels.find(p => p.level === pickLevel) || { damageMin: 1, damageMax: 1 };
+        const damage = Math.floor(Math.random() * (pick.damageMax - pick.damageMin + 1)) + pick.damageMin;
+        
+        monster.hp -= damage;
+        if (Math.random() < 0.2) {
+          global[stunKey] = Date.now() + 10000;
+          await interaction.reply({ content: `😵 Le Boss t'a mis KO ! Tu ne peux plus attaquer pendant 10 secondes.`, flags: MessageFlags.Ephemeral });
+        }
+
+        if (monster.hp <= 0) {
+          serverEventMonsters.delete('boss_ko');
+          await economy.addBalance(interaction.user.id, 15000);
+          await interaction.update({ embeds: [createEmbed('🏆 Boss KO vaincu !', `Bravo ${interaction.user}, tu as gagné 15 000 Élys !`)], components: [] });
+          return;
+        }
+        const embed = new EmbedBuilder().setColor('#e74c3c').setTitle('👹 Boss KO')
+          .setDescription(`**PV :** ${monster.hp}/${monster.maxHp}\n\nIl peut vous mettre KO !`);
+        await interaction.update({ embeds: [embed] });
+        return;
+      }
+
+      // Attaque du Boss Final
+      if (interaction.customId === 'event_attack_boss_final') {
+        const monster = serverEventMonsters.get('boss_final');
+        if (!monster) return interaction.reply({ content: "Boss final déjà vaincu !", flags: MessageFlags.Ephemeral });
+        const pickLevel = await economy.getPickaxeLevel(interaction.user.id);
+        const pick = miningData.pickaxeLevels.find(p => p.level === pickLevel) || { damageMin: 1, damageMax: 1 };
+        const damage = Math.floor(Math.random() * (pick.damageMax - pick.damageMin + 1)) + pick.damageMin;
+        
+        monster.hp -= damage;
+        if (monster.hp <= 0) {
+          serverEventMonsters.delete('boss_final');
+          const reward = Math.floor(Math.random() * (12000 - 7500 + 1)) + 7500;
+          await economy.addBalance(interaction.user.id, reward);
+          await interaction.update({ embeds: [createEmbed('☠️ BOSS FINAL VAINCU !', `Ok, bravo ! Vous êtes à la moitié de la mine. Je vous laisse ici, on se reverra très bientôt…\n\n${interaction.user} a gagné ${reward} Élys !`)], components: [] });
+          return;
+        }
+        const embed = new EmbedBuilder().setColor('#c0392b').setTitle('☠️ BOSS FINAL')
+          .setDescription(`**PV :** ${monster.hp}/${monster.maxHp}`);
+        await interaction.update({ embeds: [embed] });
+        return;
+      }
+
+      // Choix Oui/Non (Événement 4)
+      if (interaction.customId === 'event_yes' || interaction.customId === 'event_no') {
+        const choice = interaction.customId === 'event_yes' ? 'yes' : 'no';
+        const votes = eventVotes.get('choix4');
+        if (!votes) return interaction.reply({ content: "Le vote est terminé !", flags: MessageFlags.Ephemeral });
+        
+        if (choice === 'yes') votes.yes++;
+        else votes.no++;
+
+        if (votes.yes >= 2) {
+          eventVotes.delete('choix4');
+          return interaction.update({ embeds: [createEmbed('🪻 La suite...', "D'accord, mais ne dites pas que je ne vous ai pas prévenus...")], components: [] });
+        } else {
+          return interaction.reply({ content: "Vote enregistré !", flags: MessageFlags.Ephemeral });
+        }
+      }
+    }
+
+    // --- MINE : SELECT MENU (choix difficulté) ---
+    if (interaction.isStringSelectMenu()) {
+      if (interaction.customId.startsWith('mine_select_')) {
+        const difficulty = interaction.values[0];
+        const userId = interaction.customId.split('_')[2];
+        if (interaction.user.id !== userId) return interaction.reply({ content: "Ce n'est pas ta session.", flags: MessageFlags.Ephemeral });
+        const diff = miningData.difficulties[difficulty];
+        if (!diff) return interaction.reply({ content: 'Difficulté inconnue.', flags: MessageFlags.Ephemeral });
+        const team = miningTeams.get(userId) || [];
+        miningTeams.delete(userId);
+        const floor = 1;
+        const hp = calculateOreHP(floor, difficulty);
+        const rewardMin = Math.floor(diff.minReward * (1 + floor * 0.1));
+        const rewardMax = Math.floor(diff.maxReward * (1 + floor * 0.1));
+        const reward = Math.floor(Math.random() * (rewardMax - rewardMin + 1)) + rewardMin;
+        const oreName = miningData.oreNames[difficulty][Math.floor(Math.random() * miningData.oreNames[difficulty].length)];
+        const session = { userId: interaction.user.id, difficulty, floor, currentOreName: oreName, currentOreHP: hp, currentOreMaxHP: hp, currentOreReward: reward, loot: [], autoMine: false, autoMineInterval: null, lastActionLog: [], message: null, teamMembers: team };
+        const pickaxeLevel = await economy.getPickaxeLevel(interaction.user.id);
+        const pickaxe = miningData.pickaxeLevels.find(p => p.level === pickaxeLevel) || { name: "Inconnue", rarity: "?", damageMin: 1, damageMax: 1 };
+        const embed = buildMineEmbed(session, pickaxe);
+        const row1 = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`mine_attack_${interaction.user.id}`).setLabel('Attaquer').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId(`mine_refresh_${interaction.user.id}`).setLabel('Actualiser').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`mine_loot_${interaction.user.id}`).setLabel('Butin').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`mine_claim_${interaction.user.id}`).setLabel('Récupérer').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId(`mine_auto_${interaction.user.id}`).setLabel('Auto').setStyle(ButtonStyle.Primary)
+        );
+        const row2 = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`mine_stop_${interaction.user.id}`).setLabel('Arrêter').setStyle(ButtonStyle.Danger));
+        const sentMessage = await interaction.channel.send({ embeds: [embed], components: [row1, row2] });
+        session.message = sentMessage;
+        miningSessions.set(sentMessage.id, session);
+        return interaction.reply({ embeds: [createEmbed('Session lancée', 'La session de minage a commencé.')], flags: MessageFlags.Ephemeral });
+      }
+      return;
+    }
+
+    // --- BOUTONS DE LA MINE (hors events) ---
+    if (interaction.isButton()) {
+      const [action, userId] = interaction.customId.split('_');
+
+      if (interaction.customId.startsWith('mine_accept_') || interaction.customId.startsWith('mine_refuse_')) {
+        const parts = interaction.customId.split('_');
+        const type = parts[1];
+        const inviterId = parts[2];
+        const inviteeId = parts[3];
+        if (interaction.user.id !== inviteeId) return interaction.reply({ content: "Cette invitation ne t'est pas destinée.", flags: MessageFlags.Ephemeral });
+        const invite = miningInvites.get(inviteeId);
+        if (!invite) return interaction.reply({ content: "Cette invitation n'existe plus.", flags: MessageFlags.Ephemeral });
+        const inviter = await client.users.fetch(inviterId).catch(() => null);
+        if (!inviter) return interaction.reply({ content: "L'inviteur est introuvable.", flags: MessageFlags.Ephemeral });
+        if (type === 'accept') {
+          if (!miningTeams.has(inviterId)) miningTeams.set(inviterId, []);
+          const team = miningTeams.get(inviterId);
+          if (!team.includes(inviteeId)) team.push(inviteeId);
+          miningTeams.set(inviterId, team);
+          miningInvites.delete(inviteeId);
+          await interaction.update({ content: 'Invitation acceptée !', components: [] });
+          await inviter.send({ content: `${interaction.user} a accepté ton invitation pour la session de minage.` }).catch(() => {});
+        } else {
+          miningInvites.delete(inviteeId);
+          await interaction.update({ content: 'Invitation refusée.', components: [] });
+          await inviter.send({ content: `${interaction.user} a refusé ton invitation.` }).catch(() => {});
+        }
+        return;
+      }
+
+      const session = miningSessions.get(interaction.message.id);
+      if (!session) return interaction.reply({ content: "Cette session de minage est terminée.", flags: MessageFlags.Ephemeral });
+      const isLeader = interaction.user.id === session.userId;
+      const isTeamMember = session.teamMembers.includes(interaction.user.id);
+      if (!isLeader && !isTeamMember) return interaction.reply({ content: "Tu ne fais pas partie de cette session.", flags: MessageFlags.Ephemeral });
+
+      if (interaction.customId.startsWith('mine_attack_')) {
+        await interaction.deferUpdate();
+        try {
+          const attackerId = interaction.user.id;
+          const pickaxeLevel = await economy.getPickaxeLevel(attackerId);
+          const pickaxe = miningData.pickaxeLevels.find(p => p.level === pickaxeLevel) || { damageMin: 1, damageMax: 1, name: "Inconnue", rarity: "?" };
+          let damage = Math.floor(Math.random() * (pickaxe.damageMax - pickaxe.damageMin + 1)) + pickaxe.damageMin;
+          if (Math.random() < 0.1) { damage *= 2; session.lastActionLog.unshift('Coup critique !'); }
+          session.currentOreHP -= damage;
+          session.lastActionLog.unshift(`${interaction.user.username} a infligé ${damage} dégâts au ${session.currentOreName}.`);
+          if (session.currentOreHP <= 0) {
+            const reward = session.currentOreReward;
+            session.loot.push({ type: 'aure', name: 'Aure', amount: reward });
+            await economy.addAure(session.userId, reward);
+            session.lastActionLog.unshift(`${session.currentOreName} détruit ! ${reward} Aure ajoutées au butin.`);
+            for (const [resName, resData] of Object.entries(miningData.resources)) {
+              if (Math.random() < resData.dropChance) {
+                session.loot.push({ type: 'resource', name: resData.name, amount: 1 });
+                await economy.addResource(session.userId, resName, 1);
+                session.lastActionLog.unshift(`${resData.name} obtenu !`);
+              }
+            }
+            session.floor += 1;
+            if (session.floor > 50) session.floor = 50;
+            session.currentOreMaxHP = calculateOreHP(session.floor, session.difficulty);
+            session.currentOreHP = session.currentOreMaxHP;
+            const diff = miningData.difficulties[session.difficulty];
+            const rewardMin = Math.floor(diff.minReward * (1 + session.floor * 0.1));
+            const rewardMax = Math.floor(diff.maxReward * (1 + session.floor * 0.1));
+            session.currentOreReward = Math.floor(Math.random() * (rewardMax - rewardMin + 1)) + rewardMin;
+            session.currentOreName = miningData.oreNames[session.difficulty][Math.floor(Math.random() * miningData.oreNames[session.difficulty].length)];
+          }
+          const embed = buildMineEmbed(session, pickaxe);
+          if (session.message) await session.message.edit({ embeds: [embed] }).catch(() => {});
+        } catch (error) { console.error('Erreur bouton attaque mine:', error); }
+        return;
+      }
+
+      if (interaction.customId.startsWith('mine_refresh_')) {
+        await interaction.deferUpdate();
+        try {
+          const pickaxeLevel = await economy.getPickaxeLevel(interaction.user.id);
+          const pickaxe = miningData.pickaxeLevels.find(p => p.level === pickaxeLevel) || { damageMin: 1, damageMax: 1, name: "Inconnue", rarity: "?" };
+          const embed = buildMineEmbed(session, pickaxe);
+          if (session.message) await session.message.edit({ embeds: [embed] }).catch(() => {});
+        } catch (error) { console.error('Erreur bouton actualiser mine:', error); }
+        return;
+      }
+
+      if (interaction.customId.startsWith('mine_loot_')) {
+        const lootSummary = session.loot.map(item => `- ${item.name}: ${item.amount}`).join('\n') || 'Aucun butin.';
+        await interaction.reply({ embeds: [createEmbed('Butin actuel', lootSummary)], flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      if (interaction.customId.startsWith('mine_claim_')) {
+        if (!isLeader) return interaction.reply({ content: "Seul le leader peut récupérer le butin.", flags: MessageFlags.Ephemeral });
+        const lootSummary = session.loot.map(item => `- ${item.name}: ${item.amount}`).join('\n') || 'Aucun butin.';
+        try {
+          await interaction.user.send({ embeds: [createEmbed('Butin récupéré', lootSummary)] });
+          session.loot = [];
+          await interaction.reply({ content: 'Butin envoyé en MP.', flags: MessageFlags.Ephemeral });
+        } catch { await interaction.reply({ content: 'Impossible d\'envoyer le MP.', flags: MessageFlags.Ephemeral }); }
+        return;
+      }
+
+      if (interaction.customId.startsWith('mine_auto_')) {
+        if (!isLeader) return interaction.reply({ content: "Seul le leader peut activer l'auto-mine.", flags: MessageFlags.Ephemeral });
+        const hasPass = await economy.getAutoMinePass(interaction.user.id);
+        if (!hasPass) return interaction.reply({ content: "Auto-Mine Pass requis.", flags: MessageFlags.Ephemeral });
+        session.autoMine = !session.autoMine;
+        if (session.autoMine) {
+          session.autoMineInterval = setInterval(async () => {
+            try {
+              const pickaxeLevel = await economy.getPickaxeLevel(session.userId);
+              const pickaxe = miningData.pickaxeLevels.find(p => p.level === pickaxeLevel) || { damageMin: 1, damageMax: 1 };
+              let damage = Math.floor(Math.random() * (pickaxe.damageMax - pickaxe.damageMin + 1)) + pickaxe.damageMin;
+              session.currentOreHP -= damage;
+              session.lastActionLog.unshift(`[Auto] ${damage} dégâts.`);
+              if (session.currentOreHP <= 0) {
+                const reward = session.currentOreReward;
+                session.loot.push({ type: 'aure', name: 'Aure', amount: reward });
+                await economy.addAure(session.userId, reward);
+                for (const [resName, resData] of Object.entries(miningData.resources)) {
+                  if (Math.random() < resData.dropChance) { session.loot.push({ type: 'resource', name: resData.name, amount: 1 }); await economy.addResource(session.userId, resName, 1); }
+                }
+                session.floor += 1;
+                session.currentOreMaxHP = calculateOreHP(session.floor, session.difficulty);
+                session.currentOreHP = session.currentOreMaxHP;
+                const diff = miningData.difficulties[session.difficulty];
+                const rewardMin = Math.floor(diff.minReward * (1 + session.floor * 0.1));
+                const rewardMax = Math.floor(diff.maxReward * (1 + session.floor * 0.1));
+                session.currentOreReward = Math.floor(Math.random() * (rewardMax - rewardMin + 1)) + rewardMin;
+                session.currentOreName = miningData.oreNames[session.difficulty][Math.floor(Math.random() * miningData.oreNames[session.difficulty].length)];
+              }
+              const embed = buildMineEmbed(session, pickaxe);
+              if (session.message) await session.message.edit({ embeds: [embed] }).catch(() => {});
+            } catch (error) { console.error('Erreur auto-mine:', error); clearInterval(session.autoMineInterval); session.autoMine = false; }
+          }, 5000);
+        } else { clearInterval(session.autoMineInterval); session.autoMineInterval = null; }
+        await interaction.reply({ content: `Auto-mine ${session.autoMine ? 'activé' : 'désactivé'}.`, flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      if (interaction.customId.startsWith('mine_stop_')) {
+        if (!isLeader) return interaction.reply({ content: "Seul le leader peut arrêter la session.", flags: MessageFlags.Ephemeral });
+        if (session.autoMineInterval) clearInterval(session.autoMineInterval);
+        miningSessions.delete(interaction.message.id);
+        if (session.message) await session.message.delete().catch(() => {});
+        await interaction.reply({ content: 'Session arrêtée.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      if (interaction.customId.startsWith('duel_')) {
+        const parts = interaction.customId.split('_');
+        const type = parts[1];
+        const challengerId = parts[2];
+        const targetId = parts[3];
+        const mise = parseInt(parts[4]);
+        if (interaction.user.id !== challengerId) return interaction.reply({ content: "Seul l'initiateur peut choisir.", flags: MessageFlags.Ephemeral });
+        const guild = interaction.guild;
+        const target = guild.members.cache.get(targetId);
+        if (!target) return interaction.reply({ content: "Cible introuvable.", flags: MessageFlags.Ephemeral });
+        const challengerTotal = await economy.getTotalBalance(challengerId);
+        const targetTotal = await economy.getTotalBalance(targetId);
+        if (challengerTotal < mise || targetTotal < mise) return interaction.update({ content: "Un des participants n'a plus assez de solde total.", embeds: [], components: [] });
+        const choice = type === 'pile' ? 0 : 1;
+        const result = Math.random() < 0.5 ? 0 : 1;
+        let winnerId, loserId;
+        if (choice === result) { winnerId = challengerId; loserId = targetId; } else { winnerId = targetId; loserId = challengerId; }
+        await economy.deductFromTotal(loserId, mise);
+        await economy.addToCash(winnerId, mise);
+        await economy.addTransaction(winnerId, `Traque gagnée contre ${target.user.username}`, mise);
+        await economy.addTransaction(loserId, `Traque perdue contre ${interaction.user.username}`, -mise);
+        await logAction(guild, `${interaction.user.username} a gagné ${mise} Élys contre ${target.user.username}`);
+        const resultEmbed = new EmbedBuilder().setColor('#f1c40f').setTitle('Résultat de la Traque').setDescription(`Le choix : ${choice === 0 ? 'Pile' : 'Face'}\nLe résultat : ${result === 0 ? 'Pile' : 'Face'}\n\n<@${winnerId}> gagne **${mise} Élys** !`).setTimestamp();
+        await interaction.update({ embeds: [resultEmbed], components: [] });
+        return;
+      }
+      return;
+    }
+    // --- COMMANDES SLASH ---
+    if (!interaction.isChatInputCommand()) return;
+    if (interaction.guild.id !== config.guildId) return;
+
+    const { commandName, options, user, member, guild } = interaction;
+    await economy.incrementCommandUsage(user.id);
+
     if (commandName === 'test') return interaction.reply({ embeds: [createEmbed('Bot en ligne', 'Le bot fonctionne parfaitement !')] });
     if (commandName === 'testapi') {
       const target = options.getUser('membre');
@@ -545,6 +639,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           { name: 'Pouvoirs', value: '`/seirei`, `/kama @cible`, `/tsuiseki @adv <mise>`, `/ishii @source @cible`, `/bunri`, `/fuuin`, `/yoroi`, `/honoo @cible`, `/konton`, `/anarchie_mute`, `/hanamai`', inline: false },
           { name: 'AFK', value: '`/afk` : Zone AFK (20 Aure / 30 sec, max 5h/jour).', inline: false },
           { name: 'Trade', value: '`/trade @membre` : Échanger des objets avec un autre membre.', inline: false },
+          { name: 'Événements', value: '`/evenement <1-6>` : Lancer un événement spécial (Admin).', inline: false },
           { name: 'Admin', value: '`/resetcd @membre` : Réinitialiser les cooldowns.\n`/removedette @membre <tout/nombre> [montant]` : Retirer une dette.', inline: false }
         ).setFooter({ text: 'Pour plus d\'aide, contacte un administrateur.' }).setTimestamp();
       return interaction.reply({ embeds: [embed] });
@@ -625,6 +720,68 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
     }
 
+    // --- Commande Événements ---
+    if (commandName === 'evenement') {
+      if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ embeds: [createEmbed('Erreur', 'Seuls les administrateurs peuvent lancer des événements.')], flags: MessageFlags.Ephemeral });
+      const num = options.getInteger('numero');
+      const channel = interaction.channel;
+
+      if (num === 1) {
+        return interaction.reply({ embeds: [createEmbed('⚔️ Prévention', 'On réussira à battre la plus grosse mine de Valerya !')] });
+      }
+
+      if (num === 2) {
+        const monster = { name: 'Aure', hp: 1700, maxHp: 1700, reward: 2500, type: 'aure' };
+        serverEventMonsters.set('aure', monster);
+        const embed = new EmbedBuilder().setColor('#FFA500').setTitle('💎 Un Aure sauvage apparaît !')
+          .setDescription(`**PV :** ${monster.hp}/${monster.maxHp}\n\n**Récompense :** ${monster.reward} Élys\n\nAttaquez-le avec votre pioche !`);
+        const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('event_attack_aure').setLabel('⛏️ Attaquer').setStyle(ButtonStyle.Primary));
+        await interaction.reply({ embeds: [embed], components: [row] });
+        return;
+      }
+
+      if (num === 3) {
+        const monster = { name: 'Boss KO', hp: 8000, maxHp: 8000, stun: true, type: 'boss_ko' };
+        serverEventMonsters.set('boss_ko', monster);
+        const embed = new EmbedBuilder().setColor('#e74c3c').setTitle('👹 Le Boss KO apparaît !')
+          .setDescription(`**PV :** ${monster.hp}/${monster.maxHp}\n\nIl peut vous mettre KO pendant 10 secondes !\n\n**Récompense :** 15 000 Élys`);
+        const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('event_attack_boss_ko').setLabel('⚔️ Attaquer').setStyle(ButtonStyle.Danger));
+        await interaction.reply({ embeds: [embed], components: [row] });
+        return;
+      }
+
+      if (num === 4) {
+        const embed = new EmbedBuilder().setColor('#9b59b6').setTitle('🪻 La suite ?')
+          .setDescription('Vous avez vaincu le boss, bravo à vous ! Mais ce n\'est pas fini. Voulez-vous continuer ? (Oui ou Non)');
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('event_yes').setLabel('✅ Oui').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId('event_no').setLabel('❌ Non').setStyle(ButtonStyle.Danger)
+        );
+        eventVotes.set('choix4', { yes: 0, no: 0 });
+        await interaction.reply({ embeds: [embed], components: [row] });
+        return;
+      }
+
+      if (num === 5) {
+        const members = await guild.members.fetch();
+        for (const m of members.values()) {
+          if (m.user.bot) continue;
+          await economy.addBalance(m.id, -5000).catch(() => {});
+        }
+        return interaction.reply({ embeds: [createEmbed('👑 Le Roi de la Mine', 'Chère aventurière, cher aventurier... Après vous êtes perdu, vous devrez payer de votre vie. Vous devez 5 000 Élys au Roi de la Mine.')] });
+      }
+
+      if (num === 6) {
+        const monster = { name: 'BOSS FINAL', hp: 25000, maxHp: 25000, type: 'boss_final' };
+        serverEventMonsters.set('boss_final', monster);
+        const embed = new EmbedBuilder().setColor('#c0392b').setTitle('☠️ LE BOSS FINAL !')
+          .setDescription(`**PV :** ${monster.hp}/${monster.maxHp}\n\n**Récompense (à la mort) :** Entre 7 500 et 12 000 Élys !\n\nFrappez-le !`);
+        const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('event_attack_boss_final').setLabel('⚔️ Attaquer').setStyle(ButtonStyle.Danger));
+        await interaction.reply({ embeds: [embed], components: [row] });
+        return;
+      }
+    }
+
     if (commandName === 'pioche') {
       const sub = options.getSubcommand(); const lvl = await economy.getPickaxeLevel(user.id); const cur = miningData.pickaxeLevels.find(p => p.level === lvl);
       if (sub === 'info') {
@@ -691,7 +848,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const target = options.getUser('membre');
       if (!target || target.id === user.id) return interaction.reply({ embeds: [createEmbed('Erreur', 'Membre invalide.')], flags: MessageFlags.Ephemeral });
       const tradeId = `T${Date.now()}${Math.floor(Math.random() * 10000)}`;
-      const trade = { id: tradeId, user1: user.id, user2: target.id, offer1: [], offer2: [], validated1: false, validated2: false, message: null };
+      const trade = { id: tradeId, user1: user.id, user2: target.id, offer1: [], offer2: [], validated1: false, validated2: false };
+      await economy.saveTrade(user.id, trade);
+      await economy.saveTrade(target.id, trade);
       activeTrades.set(tradeId, trade);
       const embed = new EmbedBuilder().setColor('#3498db').setTitle('Échange').setDescription(`Chacun ajoute ce qu'il veut (Pioche, Matériaux) puis clique Valider. L'échange se fait quand vous avez validé tous les deux.`).addFields(
         { name: `${user.username} donne`, value: '*(rien pour le moment)*', inline: false },
@@ -740,22 +899,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     // --- Commande Admin : Remove dette ---
     if (commandName === 'removedette') {
-      if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-        return interaction.reply({ embeds: [createEmbed('Erreur', 'Seuls les administrateurs peuvent utiliser cette commande.')], flags: MessageFlags.Ephemeral });
-      }
-      const target = options.getUser('membre');
-      const targetMember = guild.members.cache.get(target.id);
+      if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ embeds: [createEmbed('Erreur', 'Seuls les administrateurs peuvent utiliser cette commande.')], flags: MessageFlags.Ephemeral });
+      const target = options.getUser('membre'); const targetMember = guild.members.cache.get(target.id);
       if (!targetMember) return interaction.reply({ embeds: [createEmbed('Erreur', 'Membre introuvable.')], flags: MessageFlags.Ephemeral });
-
-      const leQuel = options.getString('le_quel');
-      const montant = options.getInteger('montant');
-      const loans = await economy.getLoans(target.id);
-
+      const leQuel = options.getString('le_quel'); const montant = options.getInteger('montant'); const loans = await economy.getLoans(target.id);
       if (!loans.length) return interaction.reply({ embeds: [createEmbed('Erreur', `${target} n'a aucune dette.`)], flags: MessageFlags.Ephemeral });
-
-      const loan = loans[0]; // Un seul prêt à la fois
-      const currentDebt = loan.remaining;
-
+      const loan = loans[0]; const currentDebt = loan.remaining;
       if (leQuel === 'tout') {
         await economy.repayLoan(target.id, 0, currentDebt);
         return interaction.reply({ embeds: [createEmbed('Dette retirée', `Toutes les dettes de ${target} ont été retirées (${currentDebt} Élys). <a:VerifFonda:1533806937282449559>`)] });
@@ -846,9 +995,30 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return interaction.reply({ embeds: [createEmbed('Erreur', 'Commande inconnue.')], flags: MessageFlags.Ephemeral });
   } catch (error) {
     console.error('Erreur interaction:', error);
-    try { if (!interaction.replied && !interaction.deferred) await interaction.reply({ embeds: [createEmbed('Erreur', 'Une erreur est survenue.')], flags: MessageFlags.Ephemeral }); else await interaction.followUp({ embeds: [createEmbed('Erreur', 'Une erreur est survenue.')], flags: MessageFlags.Ephemeral }); } catch (e) { console.error(e); }
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction.reply({ embeds: [createEmbed('Erreur', 'Une erreur est survenue.')], flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
   }
 });
+
+// Fonction utilitaire pour mettre à jour l'embed du trade
+async function updateTradeEmbed(interaction, trade) {
+  const offer1Text = trade.offer1.length ? trade.offer1.map(i => `- ${i.name}`).join('\n') : '*(rien pour le moment)*';
+  const offer2Text = trade.offer2.length ? trade.offer2.map(i => `- ${i.name}`).join('\n') : '*(rien pour le moment)*';
+  const validationText = `Validation : <@${trade.user1}> ${trade.validated1 ? 'Validé' : 'en attente'} · <@${trade.user2}> ${trade.validated2 ? 'Validé' : 'en attente'}`;
+
+  const updatedEmbed = new EmbedBuilder()
+    .setColor('#3498db')
+    .setTitle('Échange')
+    .setDescription(`Chacun ajoute ce qu'il veut (Pioche, Matériaux) puis clique Valider.`)
+    .addFields(
+      { name: `<@${trade.user1}> donne`, value: offer1Text, inline: false },
+      { name: `<@${trade.user2}> donne`, value: offer2Text, inline: false },
+      { name: 'Validation', value: validationText, inline: false }
+    );
+
+  await interaction.update({ embeds: [updatedEmbed] });
+}
 
 // --- Commandes textuelles + ---
 client.on(Events.MessageCreate, async (message) => {

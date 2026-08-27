@@ -179,8 +179,49 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
     }
   }
 });
+
 client.on(Events.InteractionCreate, async (interaction) => {
-  // --- Gestion du Trade interactif (corrigé) ---
+  // --- GESTION DU TRADE : MENU DÉROULANT (Corrigé ici !) ---
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('trade_select_')) {
+    const parts = interaction.customId.split('_');
+    const tradeId = parts[2];
+    const trade = activeTrades.get(tradeId);
+    if (!trade) return interaction.reply({ content: "Cet échange n'existe plus.", flags: MessageFlags.Ephemeral });
+
+    const isUser1 = interaction.user.id === trade.user1;
+    const isUser2 = interaction.user.id === trade.user2;
+    if (!isUser1 && !isUser2) return interaction.reply({ content: "Tu ne participes pas à cet échange.", flags: MessageFlags.Ephemeral });
+
+    const currentUserKey = isUser1 ? 'offer1' : 'offer2';
+    const currentValidKey = isUser1 ? 'validated1' : 'validated2';
+
+    const resKey = interaction.values[0];
+    const resInfo = miningData.resources[resKey];
+    const resCount = await economy.getResource(interaction.user.id, resKey);
+    if (resCount <= 0) return interaction.reply({ content: "Tu n'as pas ce matériau.", flags: MessageFlags.Ephemeral });
+
+    trade[currentUserKey].push({ type: 'materiaux', name: resInfo.name, value: 1, resourceKey: resKey });
+    trade[currentValidKey] = false;
+
+    const offer1Text = trade.offer1.length ? trade.offer1.map(i => `- ${i.name}`).join('\n') : '*(rien pour le moment)*';
+    const offer2Text = trade.offer2.length ? trade.offer2.map(i => `- ${i.name}`).join('\n') : '*(rien pour le moment)*';
+    const validationText = `Validation : <@${trade.user1}> ${trade.validated1 ? 'Validé' : 'en attente'} · <@${trade.user2}> ${trade.validated2 ? 'Validé' : 'en attente'}`;
+
+    const updatedEmbed = new EmbedBuilder()
+      .setColor('#3498db')
+      .setTitle('Échange')
+      .setDescription(`Chacun ajoute ce qu'il veut (Pioche, Matériaux) puis clique Valider.`)
+      .addFields(
+        { name: `<@${trade.user1}> donne`, value: offer1Text, inline: false },
+        { name: `<@${trade.user2}> donne`, value: offer2Text, inline: false },
+        { name: 'Validation', value: validationText, inline: false }
+      );
+
+    await interaction.update({ embeds: [updatedEmbed] });
+    return;
+  }
+
+  // --- GESTION DU TRADE : BOUTONS ---
   if (interaction.isButton() && interaction.customId.startsWith('trade_')) {
     const parts = interaction.customId.split('_');
     const action = parts[1];
@@ -210,15 +251,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         )
       );
       return interaction.reply({ content: 'Choisis un matériau à ajouter :', components: [selectRow], flags: MessageFlags.Ephemeral });
-    }
-
-    if (interaction.isStringSelectMenu() && interaction.customId.startsWith('trade_select_')) {
-      const resKey = interaction.values[0];
-      const resInfo = miningData.resources[resKey];
-      const resCount = await economy.getResource(interaction.user.id, resKey);
-      if (resCount <= 0) return interaction.reply({ content: "Tu n'as pas ce matériau.", flags: MessageFlags.Ephemeral });
-      trade[currentUserKey].push({ type: 'materiaux', name: resInfo.name, value: 1, resourceKey: resKey });
-      trade[currentValidKey] = false;
     }
 
     if (action === 'validate') {
@@ -267,7 +299,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  // --- MINE (Select Menu) ---
+  // --- MINE : SELECT MENU (choix difficulté) ---
   if (interaction.isStringSelectMenu()) {
     if (interaction.customId.startsWith('mine_select_')) {
       const difficulty = interaction.values[0];
@@ -407,7 +439,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.customId.startsWith('mine_auto_')) {
       if (!isLeader) return interaction.reply({ content: "Seul le leader peut activer l'auto-mine.", flags: MessageFlags.Ephemeral });
-      // CORRECTION DU BUG : on utilise interaction.user.id, pas la variable userId mal découpée
       const hasPass = await economy.getAutoMinePass(interaction.user.id);
       if (!hasPass) return interaction.reply({ content: "Auto-Mine Pass requis.", flags: MessageFlags.Ephemeral });
       session.autoMine = !session.autoMine;
@@ -480,8 +511,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
     return;
-  }
-  if (!interaction.isChatInputCommand()) return;
+  }if (!interaction.isChatInputCommand()) return;
   if (interaction.guild.id !== config.guildId) return;
 
   const { commandName, options, user, member, guild } = interaction;

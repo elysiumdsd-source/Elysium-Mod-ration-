@@ -110,7 +110,7 @@ client.once(Events.ClientReady, async () => {
       .addSubcommand(sub => sub.setName('upgrade').setDescription('Améliorer ta pioche.'))
       .addSubcommand(sub => sub.setName('use').setDescription('Utiliser une pioche possédée')),
     new SlashCommandBuilder().setName('mine').setDescription('Lancer une session de minage').addUserOption(option => option.setName('membre').setDescription('Inviter un membre à rejoindre ton équipe (optionnel)').setRequired(false)),
-    new SlashCommandBuilder().setName('craft').setDescription('Fabriquer un objet').addStringOption(option => option.setName('objet').setDescription('Objet à fabriquer').setRequired(true).addChoices({ name: 'Auto-Mine Pass', value: 'auto_mine_pass' }, { name: 'Drop x2', value: 'drop' })),
+    new SlashCommandBuilder().setName('craft').setDescription('Fabriquer un objet').addStringOption(option => option.setName('objet').setDescription('Objet à fabriquer').setRequired(true).addChoices({ name: 'Auto-Mine Pass', value: 'auto_mine_pass' }, { name: 'Drop x2 (Bientôt)', value: 'drop' })),
     new SlashCommandBuilder().setName('inventaire').setDescription('Voir ton inventaire.'),
     new SlashCommandBuilder().setName('afk').setDescription('Aller en zone AFK pour gagner des Aure.'),
     new SlashCommandBuilder().setName('trade').setDescription('Échanger des objets avec un autre membre').addUserOption(opt => opt.setName('membre').setDescription('Le membre avec qui échanger').setRequired(true)),
@@ -271,11 +271,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await economy.deleteSavedTrade(trade.user1, tradeId);
           await economy.deleteSavedTrade(trade.user2, tradeId);
 
-          // Transfert des biens (PIOCHE NON CONSOMMÉE pour le donneur)
+          // Transfert des biens (PIOCHE RETIRÉE au donneur, AJOUTÉE au receveur)
           for (const item of trade.offer1) {
             if (item.type === 'pioche') {
-              // Le receveur reçoit la pioche, mais le donneur la GARDE
+              // Retirer la pioche du donneur
+              await economy.removeOwnedPickaxe(trade.user1, item.value);
+              // Ajouter la pioche au receveur
               await economy.addOwnedPickaxe(trade.user2, item.value);
+              // Mettre à jour la pioche active du receveur (s'il n'en a pas ou pour la meilleure)
+              const receiverLevel = await economy.getPickaxeLevel(trade.user2);
+              if (item.value > receiverLevel) await economy.setPickaxeLevel(trade.user2, item.value);
             } else if (item.type === 'materiaux') {
               await economy.removeResource(trade.user1, item.resourceKey, item.value);
               await economy.addResource(trade.user2, item.resourceKey, item.value);
@@ -283,7 +288,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
           for (const item of trade.offer2) {
             if (item.type === 'pioche') {
+              await economy.removeOwnedPickaxe(trade.user2, item.value);
               await economy.addOwnedPickaxe(trade.user1, item.value);
+              const receiverLevel = await economy.getPickaxeLevel(trade.user1);
+              if (item.value > receiverLevel) await economy.setPickaxeLevel(trade.user1, item.value);
             } else if (item.type === 'materiaux') {
               await economy.removeResource(trade.user2, item.resourceKey, item.value);
               await economy.addResource(trade.user1, item.resourceKey, item.value);
@@ -312,99 +320,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // --- BOUTONS DES ÉVÉNEMENTS ---
-    if (interaction.isButton() && interaction.customId.startsWith('event_')) {
-      // Attaque de l'Aure
-      if (interaction.customId === 'event_attack_aure') {
-        const monster = serverEventMonsters.get('aure');
-        if (!monster) return interaction.reply({ content: "L'Aure est déjà vaincu !", flags: MessageFlags.Ephemeral });
-        const pickLevel = await economy.getPickaxeLevel(interaction.user.id);
-        const pick = miningData.pickaxeLevels.find(p => p.level === pickLevel) || { damageMin: 1, damageMax: 1 };
-        const damage = Math.floor(Math.random() * (pick.damageMax - pick.damageMin + 1)) + pick.damageMin;
-        
-        monster.hp -= damage;
-        if (monster.hp <= 0) {
-          serverEventMonsters.delete('aure');
-          await economy.addBalance(interaction.user.id, monster.reward);
-          await interaction.update({ embeds: [createEmbed('💎 Victoire !', `L'Aure est vaincu ! ${interaction.user} gagne ${monster.reward} Élys !`)], components: [] });
-          return;
-        }
-        const embed = new EmbedBuilder().setColor('#FFA500').setTitle('💎 Aure sauvage')
-          .setDescription(`**PV :** ${monster.hp}/${monster.maxHp}\n\n**Récompense :** ${monster.reward} Élys`);
-        await interaction.update({ embeds: [embed] });
-        return;
-      }
-
-      // Attaque du Boss KO
-      if (interaction.customId === 'event_attack_boss_ko') {
-        const monster = serverEventMonsters.get('boss_ko');
-        if (!monster) return interaction.reply({ content: "Boss déjà vaincu !", flags: MessageFlags.Ephemeral });
-
-        const stunKey = `stun_${interaction.user.id}`;
-        if (Date.now() < (global[stunKey] || 0)) {
-          return interaction.reply({ content: "😵 Tu es KO ! Tu ne peux plus attaquer pendant 10 secondes.", flags: MessageFlags.Ephemeral });
-        }
-
-        const pickLevel = await economy.getPickaxeLevel(interaction.user.id);
-        const pick = miningData.pickaxeLevels.find(p => p.level === pickLevel) || { damageMin: 1, damageMax: 1 };
-        const damage = Math.floor(Math.random() * (pick.damageMax - pick.damageMin + 1)) + pick.damageMin;
-        
-        monster.hp -= damage;
-        if (Math.random() < 0.2) {
-          global[stunKey] = Date.now() + 10000;
-          await interaction.reply({ content: `😵 Le Boss t'a mis KO ! Tu ne peux plus attaquer pendant 10 secondes.`, flags: MessageFlags.Ephemeral });
-        }
-
-        if (monster.hp <= 0) {
-          serverEventMonsters.delete('boss_ko');
-          await economy.addBalance(interaction.user.id, 15000);
-          await interaction.update({ embeds: [createEmbed('🏆 Boss KO vaincu !', `Bravo ${interaction.user}, tu as gagné 15 000 Élys !`)], components: [] });
-          return;
-        }
-        const embed = new EmbedBuilder().setColor('#e74c3c').setTitle('👹 Boss KO')
-          .setDescription(`**PV :** ${monster.hp}/${monster.maxHp}\n\nIl peut vous mettre KO !`);
-        await interaction.update({ embeds: [embed] });
-        return;
-      }
-
-      // Attaque du Boss Final
-      if (interaction.customId === 'event_attack_boss_final') {
-        const monster = serverEventMonsters.get('boss_final');
-        if (!monster) return interaction.reply({ content: "Boss final déjà vaincu !", flags: MessageFlags.Ephemeral });
-        const pickLevel = await economy.getPickaxeLevel(interaction.user.id);
-        const pick = miningData.pickaxeLevels.find(p => p.level === pickLevel) || { damageMin: 1, damageMax: 1 };
-        const damage = Math.floor(Math.random() * (pick.damageMax - pick.damageMin + 1)) + pick.damageMin;
-        
-        monster.hp -= damage;
-        if (monster.hp <= 0) {
-          serverEventMonsters.delete('boss_final');
-          const reward = Math.floor(Math.random() * (12000 - 7500 + 1)) + 7500;
-          await economy.addBalance(interaction.user.id, reward);
-          await interaction.update({ embeds: [createEmbed('☠️ BOSS FINAL VAINCU !', `Ok, bravo ! Vous êtes à la moitié de la mine. Je vous laisse ici, on se reverra très bientôt…\n\n${interaction.user} a gagné ${reward} Élys !`)], components: [] });
-          return;
-        }
-        const embed = new EmbedBuilder().setColor('#c0392b').setTitle('☠️ BOSS FINAL')
-          .setDescription(`**PV :** ${monster.hp}/${monster.maxHp}`);
-        await interaction.update({ embeds: [embed] });
-        return;
-      }
-
-      // Choix Oui/Non (Événement 4)
-      if (interaction.customId === 'event_yes' || interaction.customId === 'event_no') {
-        const choice = interaction.customId === 'event_yes' ? 'yes' : 'no';
-        const votes = eventVotes.get('choix4');
-        if (!votes) return interaction.reply({ content: "Le vote est terminé !", flags: MessageFlags.Ephemeral });
-        
-        if (choice === 'yes') votes.yes++;
-        else votes.no++;
-
-        if (votes.yes >= 2) {
-          eventVotes.delete('choix4');
-          return interaction.update({ embeds: [createEmbed('🪻 La suite...', "D'accord, mais ne dites pas que je ne vous ai pas prévenus...")], components: [] });
-        } else {
-          return interaction.reply({ content: "Vote enregistré !", flags: MessageFlags.Ephemeral });
-        }
-      }
+    // --- GESTION DU MENU PIOCHE USE ---
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith('pickaxe_use_')) {
+      const userId = interaction.customId.split('_')[2];
+      if (interaction.user.id !== userId) return interaction.reply({ content: "Ce n'est pas pour toi.", flags: MessageFlags.Ephemeral });
+      const level = parseInt(interaction.values[0]);
+      await economy.setPickaxeLevel(userId, level);
+      const pick = miningData.pickaxeLevels.find(p => p.level === level);
+      return interaction.update({ content: `Tu utilises maintenant ${pick.name} !`, embeds: [] });
     }
 
     // --- MINE : SELECT MENU ---
@@ -648,7 +571,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .addFields(
           { name: 'Général', value: '`/prix` : Liste des pouvoirs.\n`/cmdp` : Commandes des pouvoirs.\n`/guide` : Ce guide.', inline: false },
           { name: 'Banque', value: '`/bank deposit <montant>` : Déposer (taxe 20%).\n`/bank withdraw <montant>` : Retirer.\n`/bank balance` : Solde.\n`/bank pret <montant> <jours>` : Faire un prêt (max 2 jours).\n`/bank dette` : Voir tes dettes.\n`/bank rembourser <montant>` : Rembourser.', inline: false },
-          { name: 'Minage', value: '`/mine` : Lancer une session.\n`/pioche info` : Stats de ta pioche.\n`/pioche use` : Utiliser une pioche.\n`/pioche upgrade` : Améliorer.\n`/craft auto_mine_pass` : Fabriquer pass.\n`/craft drop` : Multiplier les drops par 2.\n`/inventaire` : Voir ressources.', inline: false },
+          { name: 'Minage', value: '`/mine` : Lancer une session.\n`/pioche info` : Stats de ta pioche.\n`/pioche use` : Utiliser une pioche.\n`/pioche upgrade` : Améliorer.\n`/craft auto_mine_pass` : Fabriquer pass.\n`/inventaire` : Voir ressources.', inline: false },
           { name: 'Jeux', value: '`/pileouface @adv <mise>` : Pile ou face.\n`/bingo <récompense> [durée]` : Bingo.', inline: false },
           { name: 'Infos', value: '`/cooldowns` : Cooldowns.\n`/etat` : Ton état.\n`/historique` : Transactions.\n`/stats` : Statistiques.', inline: false },
           { name: 'Pouvoirs', value: '`/seirei`, `/kama @cible`, `/tsuiseki @adv <mise>`, `/ishii @source @cible`, `/bunri`, `/fuuin`, `/yoroi`, `/honoo @cible`, `/konton`, `/anarchie_mute`, `/hanamai`', inline: false },
@@ -778,12 +701,41 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.reply({ embeds: [createEmbed('Craft réussi', 'Tu as fabriqué un Auto-Mine Pass !')] });
       }
       if (item === 'drop') {
-        const frag = await economy.getResource(user.id, 'fragment_ame'); const noyau = await economy.getResource(user.id, 'noyau_volcan');
-        if (frag < 20 || noyau < 2) return interaction.reply({ embeds: [createEmbed('Matériaux manquants', 'Il te faut 20 fragments d\'âme et 2 noyaux volcan.')], flags: MessageFlags.Ephemeral });
-        await economy.removeResource(user.id, 'fragment_ame', 20); await economy.removeResource(user.id, 'noyau_volcan', 2); await economy.setAutoMinePass(user.id, true);
-        await economy.setDropMultiplier(user.id, 2);
-        return interaction.reply({ embeds: [createEmbed('Craft réussi', 'Tu as activé le **Drop x2** ! Tu auras 2x plus de matériaux en minant.')] });
+        return interaction.reply({ embeds: [createEmbed('Bientôt disponible', 'Le craft "Drop x2" n\'est pas encore disponible, reviens plus tard !')], flags: MessageFlags.Ephemeral });
       }
+    }
+
+    if (commandName === 'inventaire') {
+      const aure = await economy.getAure(user.id); const lvl = await economy.getPickaxeLevel(user.id); const pick = miningData.pickaxeLevels.find(p => p.level === lvl); const pass = await economy.getAutoMinePass(user.id) ? 'Oui' : 'Non';
+      const res = {}; for (const rn of Object.keys(miningData.resources)) res[rn] = await economy.getResource(user.id, rn);
+      const embed = new EmbedBuilder().setColor('#3498db').setTitle('Inventaire').addFields({ name: 'Aure', value: `${aure}`, inline: true }, { name: 'Pioche', value: `${pick.name} (Niv. ${lvl})`, inline: true }, { name: 'Auto-Mine Pass', value: pass, inline: true });
+      for (const [key, val] of Object.entries(res)) embed.addFields({ name: miningData.resources[key]?.name || key, value: `${val}`, inline: true });
+      return interaction.reply({ embeds: [embed] });
+    }
+
+    if (commandName === 'afk') {
+      const can = await economy.canClaimAfk(user.id); if (!can) return interaction.reply({ embeds: [createEmbed('Limite AFK atteinte', 'Tu as déjà utilisé tes 5h d\'AFK aujourd\'hui.')], flags: MessageFlags.Ephemeral });
+      if (afkIntervals.has(user.id)) return interaction.reply({ embeds: [createEmbed('Déjà en AFK', 'Tu es déjà en zone AFK.')], flags: MessageFlags.Ephemeral });
+      const interval = setInterval(async () => { const still = await economy.canClaimAfk(user.id); if (!still) { clearInterval(interval); afkIntervals.delete(user.id); return; } await economy.claimAfk(user.id); }, 30000);
+      afkIntervals.set(user.id, interval);
+      return interaction.reply({ embeds: [createEmbed('Zone AFK activée', 'Tu gagnes 20 Aure toutes les 30 secondes (max 5h/jour).')], flags: MessageFlags.Ephemeral });
+    }
+
+    if (commandName === 'trade') {
+      const target = options.getUser('membre');
+      if (!target || target.id === user.id) return interaction.reply({ embeds: [createEmbed('Erreur', 'Membre invalide.')], flags: MessageFlags.Ephemeral });
+      const tradeId = `T${Date.now()}${Math.floor(Math.random() * 10000)}`;
+      const trade = { id: tradeId, user1: user.id, user2: target.id, offer1: [], offer2: [], validated1: false, validated2: false };
+      await economy.saveTrade(user.id, trade); await economy.saveTrade(target.id, trade); activeTrades.set(tradeId, trade);
+      const embed = new EmbedBuilder().setColor('#3498db').setTitle('Échange').setDescription(`Chacun ajoute ce qu'il veut (Pioche, Matériaux) puis clique Valider. L'échange se fait quand vous avez validé tous les deux.`).addFields(
+        { name: `${user.username} donne`, value: '*(rien pour le moment)*', inline: false },
+        { name: `${target.username} donne`, value: '*(rien pour le moment)*', inline: false },
+        { name: 'Validation', value: `<@${user.id}> en attente · <@${target.id}> en attente`, inline: false }
+      );
+      const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`trade_pickaxe_${tradeId}`).setLabel('Ajouter Pioche').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId(`trade_materials_${tradeId}`).setLabel('Ajouter Matériaux').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId(`trade_validate_${tradeId}`).setLabel('Valider mon offre').setStyle(ButtonStyle.Success));
+      const row2 = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`trade_cancel_${tradeId}`).setLabel('Annuler').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId(`trade_clear_${tradeId}`).setLabel('Vider mon offre').setStyle(ButtonStyle.Secondary));
+      await interaction.reply({ embeds: [embed], components: [row, row2] });
+      return;
     }
 
     if (commandName === 'addmine') {
@@ -822,69 +774,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return interaction.reply({ embeds: [createEmbed('Cooldowns réinitialisés', `Les cooldowns de ${target} ont été réinitialisés.`)] });
     }
 
-    // --- GESTION DU MENU PIOCHE USE ---
-    if (interaction.isStringSelectMenu() && interaction.customId.startsWith('pickaxe_use_')) {
-      const userId = interaction.customId.split('_')[2];
-      if (interaction.user.id !== userId) return interaction.reply({ content: "Ce n'est pas pour toi.", flags: MessageFlags.Ephemeral });
-      const level = parseInt(interaction.values[0]);
-      await economy.setPickaxeLevel(userId, level);
-      const pick = miningData.pickaxeLevels.find(p => p.level === level);
-      return interaction.update({ content: `Tu utilises maintenant ${pick.name} !`, embeds: [] });
+    if (commandName === 'pileouface') {
+      const target = options.getUser('adversaire'); const mise = options.getInteger('mise');
+      const targetMember = guild.members.cache.get(target.id);
+      if (!targetMember) return interaction.reply({ embeds: [createEmbed('Erreur', 'Membre introuvable.')], flags: MessageFlags.Ephemeral });
+      if (mise <= 0) return interaction.reply({ embeds: [createEmbed('Erreur', 'Mise invalide.')], flags: MessageFlags.Ephemeral });
+      const memberTotal = await economy.getTotalBalance(user.id); const targetTotal = await economy.getTotalBalance(target.id);
+      if (memberTotal < mise) return interaction.reply({ embeds: [createEmbed('Erreur', 'Tu n\'as pas assez de solde total.')], flags: MessageFlags.Ephemeral });
+      if (targetTotal < mise) return interaction.reply({ embeds: [createEmbed('Erreur', `${target} n'a pas assez de solde total.`)], flags: MessageFlags.Ephemeral });
+      const win = Math.random() < 0.5;
+      if (win) { await economy.deductFromTotal(target.id, mise); await economy.addToCash(user.id, mise); await economy.addTransaction(user.id, `Pile ou face gagné contre ${target.username}`, mise); await economy.addTransaction(target.id, `Pile ou face perdu contre ${user.username}`, -mise); return interaction.reply({ embeds: [createEmbed('Pile ou face', `${user} gagne ${mise} Élys contre ${target} !`)] }); }
+      else { await economy.deductFromTotal(user.id, mise); await economy.addToCash(target.id, mise); await economy.addTransaction(user.id, `Pile ou face perdu contre ${target.username}`, -mise); await economy.addTransaction(target.id, `Pile ou face gagné contre ${user.username}`, mise); return interaction.reply({ embeds: [createEmbed('Pile ou face', `${target} gagne ${mise} Élys contre ${user} !`)] }); }
     }
 
-    if (commandName === 'mine') {
-      const invited = options.getUser('membre');
-      if (invited) {
-        if (invited.id === user.id) return interaction.reply({ embeds: [createEmbed('Erreur', 'Tu ne peux pas t\'inviter toi-même.')], flags: MessageFlags.Ephemeral });
-        if (miningInvites.has(invited.id)) return interaction.reply({ embeds: [createEmbed('Erreur', 'Ce membre a déjà une invitation en attente.')], flags: MessageFlags.Ephemeral });
-        miningInvites.set(invited.id, { inviterId: user.id, guildId: guild.id, status: 'pending' });
-        const embed = new EmbedBuilder().setColor(config.embedColor).setTitle('Invitation à rejoindre une équipe de minage').setDescription(`${user} t'invite à rejoindre sa session de minage.`);
-        const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`mine_accept_${user.id}_${invited.id}`).setLabel('Accepter').setStyle(ButtonStyle.Success), new ButtonBuilder().setCustomId(`mine_refuse_${user.id}_${invited.id}`).setLabel('Refuser').setStyle(ButtonStyle.Danger));
-        try { await invited.send({ embeds: [embed], components: [row] }); return interaction.reply({ embeds: [createEmbed('Invitation envoyée', `Invitation envoyée à ${invited}.`)], flags: MessageFlags.Ephemeral }); }
-        catch { miningInvites.delete(invited.id); return interaction.reply({ embeds: [createEmbed('Erreur', 'Impossible d\'envoyer un MP à ce membre.')], flags: MessageFlags.Ephemeral }); }
-      }
-      if ([...miningSessions.values()].some(s => s.userId === user.id)) return interaction.reply({ embeds: [createEmbed('Erreur', 'Tu as déjà une session de minage active.')], flags: MessageFlags.Ephemeral });
-      const team = miningTeams.get(user.id) || [];
-      const selectOptions = Object.entries(miningData.difficulties).map(([dn, dd]) => { let emoji; switch(dn) { case 'Facile': emoji = '🌱'; break; case 'Moyen': emoji = '🌊'; break; case 'Dur': emoji = '🟣'; break; case 'Extreme': emoji = '🟠'; break; case 'Enfer': emoji = '🔥'; break; case 'Cauchemar': emoji = '👹'; break; default: emoji = '⛏️'; } return new StringSelectMenuOptionBuilder().setLabel(`${emoji} ${dn}`).setValue(dn).setDescription(`${dd.minReward}-${dd.maxReward} Aure / étage`); });
-      const selectRow = new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`mine_select_${user.id}`).setPlaceholder('Choisis une difficulté...').addOptions(selectOptions));
-      const desc = team.length > 0 ? `**Équipe :** ${team.map(id => `<@${id}>`).join(', ')}\n\nSélectionne une difficulté pour lancer la session.` : 'Sélectionne une difficulté pour commencer à miner.';
-      return interaction.reply({ embeds: [createEmbed('Choisis ta difficulté', desc)], components: [selectRow] });
-    }
-
-    if (commandName === 'inventaire') {
-      const aure = await economy.getAure(user.id); const lvl = await economy.getPickaxeLevel(user.id); const pick = miningData.pickaxeLevels.find(p => p.level === lvl); const pass = await economy.getAutoMinePass(user.id) ? 'Oui' : 'Non';
-      const res = {}; for (const rn of Object.keys(miningData.resources)) res[rn] = await economy.getResource(user.id, rn);
-      const embed = new EmbedBuilder().setColor('#3498db').setTitle('Inventaire').addFields({ name: 'Aure', value: `${aure}`, inline: true }, { name: 'Pioche', value: `${pick.name} (Niv. ${lvl})`, inline: true }, { name: 'Auto-Mine Pass', value: pass, inline: true });
-      for (const [key, val] of Object.entries(res)) embed.addFields({ name: miningData.resources[key]?.name || key, value: `${val}`, inline: true });
-      return interaction.reply({ embeds: [embed] });
-    }
-
-    if (commandName === 'afk') {
-      const can = await economy.canClaimAfk(user.id); if (!can) return interaction.reply({ embeds: [createEmbed('Limite AFK atteinte', 'Tu as déjà utilisé tes 5h d\'AFK aujourd\'hui.')], flags: MessageFlags.Ephemeral });
-      if (afkIntervals.has(user.id)) return interaction.reply({ embeds: [createEmbed('Déjà en AFK', 'Tu es déjà en zone AFK.')], flags: MessageFlags.Ephemeral });
-      const interval = setInterval(async () => { const still = await economy.canClaimAfk(user.id); if (!still) { clearInterval(interval); afkIntervals.delete(user.id); return; } await economy.claimAfk(user.id); }, 30000);
-      afkIntervals.set(user.id, interval);
-      return interaction.reply({ embeds: [createEmbed('Zone AFK activée', 'Tu gagnes 20 Aure toutes les 30 secondes (max 5h/jour).')], flags: MessageFlags.Ephemeral });
-    }
-
-    if (commandName === 'trade') {
-      const target = options.getUser('membre');
-      if (!target || target.id === user.id) return interaction.reply({ embeds: [createEmbed('Erreur', 'Membre invalide.')], flags: MessageFlags.Ephemeral });
-      const tradeId = `T${Date.now()}${Math.floor(Math.random() * 10000)}`;
-      const trade = { id: tradeId, user1: user.id, user2: target.id, offer1: [], offer2: [], validated1: false, validated2: false };
-      await economy.saveTrade(user.id, trade); await economy.saveTrade(target.id, trade); activeTrades.set(tradeId, trade);
-      const embed = new EmbedBuilder().setColor('#3498db').setTitle('Échange').setDescription(`Chacun ajoute ce qu'il veut (Pioche, Matériaux) puis clique Valider. L'échange se fait quand vous avez validé tous les deux.`).addFields(
-        { name: `${user.username} donne`, value: '*(rien pour le moment)*', inline: false },
-        { name: `${target.username} donne`, value: '*(rien pour le moment)*', inline: false },
-        { name: 'Validation', value: `<@${user.id}> en attente · <@${target.id}> en attente`, inline: false }
-      );
-      const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`trade_pickaxe_${tradeId}`).setLabel('Ajouter Pioche').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId(`trade_materials_${tradeId}`).setLabel('Ajouter Matériaux').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId(`trade_validate_${tradeId}`).setLabel('Valider mon offre').setStyle(ButtonStyle.Success));
-      const row2 = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`trade_cancel_${tradeId}`).setLabel('Annuler').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId(`trade_clear_${tradeId}`).setLabel('Vider mon offre').setStyle(ButtonStyle.Secondary));
-      await interaction.reply({ embeds: [embed], components: [row, row2] });
-      return;
-    }
-
-    // --- FIN DU TRADE ---
     return interaction.reply({ embeds: [createEmbed('Erreur', 'Commande inconnue.')], flags: MessageFlags.Ephemeral });
   } catch (error) {
     console.error('Erreur interaction:', error);
@@ -925,14 +827,6 @@ client.on(Events.MessageCreate, async (message) => {
     switch (command) {
       case 'test': return message.channel.send({ embeds: [createEmbed('Bot en ligne', 'Le bot fonctionne parfaitement !')] });
       case 'prix': { const priceEmbed = new EmbedBuilder().setColor(config.embedColor).setTitle('Liste des pouvoirs et prix').setDescription('Voici tous les pouvoirs disponibles dans le shop :').addFields(powers.map(p => ({ name: `${p.emoji} ${p.name} - ${p.price ? `${p.price} Élys` : 'Événement'}`, value: p.description, inline: false }))).setTimestamp(); return message.channel.send({ embeds: [priceEmbed] }); }
-      case 'guide': { const embed = new EmbedBuilder().setColor(config.embedColor).setTitle('Guide des commandes').setDescription('**Bienvenue !** Voici la liste des commandes disponibles.').addFields(
-        { name: 'Général', value: '`+prix` : Liste des pouvoirs.\n`+cmdp` : Commandes des pouvoirs.\n`+guide` : Ce guide.', inline: false },
-        { name: 'Banque', value: '`+bank deposit <montant>` : Déposer (taxe 20%).\n`+bank withdraw <montant>` : Retirer.\n`+bank balance` : Solde.', inline: false },
-        { name: 'Minage', value: '`+mine` : Lancer une session.\n`+pioche info` : Stats de ta pioche.\n`+pioche use` : Utiliser une pioche.\n`+craft auto_mine_pass` : Fabriquer pass.\n`+inventaire` : Voir ressources.', inline: false },
-        { name: 'Jeux', value: '`+pileouface @adv <mise>` : Pile ou face.\n`+bingo <récompense> [durée]` : Bingo.', inline: false },
-        { name: 'Infos', value: '`+cooldowns` : Cooldowns.\n`+etat` : Ton état.\n`+historique` : Transactions.\n`+stats` : Statistiques.', inline: false },
-        { name: 'Pouvoirs', value: '`+seirei`, `+kama @cible`, `+tsuiseki @adv <mise>`, `+ishii @source @cible`, `+bunri`, `+fuuin`, `+yoroi`, `+honoo @cible`, `+konton`, `+anarchie_mute`, `+hanamai`', inline: false }
-      ).setFooter({ text: 'Pour plus d\'aide, contacte un administrateur.' }).setTimestamp(); return message.channel.send({ embeds: [embed] }); }
       case 'bank': {
         const sub = args[0]?.toLowerCase(); const amount = parseInt(args[1]);
         if (sub === 'deposit') { if (isNaN(amount) || amount <= 0) return message.reply({ embeds: [createEmbed('Erreur', 'Montant invalide.')] }); const cash = await economy.getBalance(message.author.id); if (cash < amount) return message.reply({ embeds: [createEmbed('Erreur', 'Pas assez de cash.')] }); const tax = Math.floor(amount * 0.20); await economy.addBalance(message.author.id, -amount); await economy.addBank(message.author.id, amount - tax); return message.channel.send({ embeds: [createEmbed('Banque', `Dépôt de ${amount - tax} Élys effectué (taxe ${tax}).`)] }); }
@@ -947,7 +841,7 @@ client.on(Events.MessageCreate, async (message) => {
       case 'craft': {
         const item = args[0]?.toLowerCase();
         if (item === 'auto_mine_pass') { const frag = await economy.getResource(message.author.id, 'fragment_ame'); const eclat = await economy.getResource(message.author.id, 'eclat_lune'); if (frag < 10 || eclat < 5) return message.reply({ embeds: [createEmbed('Erreur', 'Il te faut 10 fragments et 5 éclats.')] }); await economy.removeResource(message.author.id, 'fragment_ame', 10); await economy.removeResource(message.author.id, 'eclat_lune', 5); await economy.setAutoMinePass(message.author.id, true); return message.channel.send({ embeds: [createEmbed('Craft réussi', 'Auto-Mine Pass fabriqué !')] }); }
-        if (item === 'drop') { const frag = await economy.getResource(message.author.id, 'fragment_ame'); const noyau = await economy.getResource(message.author.id, 'noyau_volcan'); if (frag < 20 || noyau < 2) return message.reply({ embeds: [createEmbed('Erreur', 'Il te faut 20 fragments et 2 noyaux.')] }); await economy.removeResource(message.author.id, 'fragment_ame', 20); await economy.removeResource(message.author.id, 'noyau_volcan', 2); await economy.setDropMultiplier(message.author.id, 2); return message.channel.send({ embeds: [createEmbed('Craft réussi', 'Drop x2 activé !')] }); }
+        if (item === 'drop') return message.channel.send({ embeds: [createEmbed('Bientôt disponible', 'Le craft "Drop x2" n\'est pas encore disponible !')] });
       }
       case 'inventaire': case 'inv': { const aure = await economy.getAure(message.author.id); const lvl = await economy.getPickaxeLevel(message.author.id); const p = miningData.pickaxeLevels.find(x => x.level === lvl); const pass = await economy.getAutoMinePass(message.author.id) ? 'Oui' : 'Non'; const res = {}; for (const rn of Object.keys(miningData.resources)) res[rn] = await economy.getResource(message.author.id, rn); const embed = new EmbedBuilder().setColor('#3498db').setTitle('Inventaire').addFields({ name: 'Aure', value: `${aure}`, inline: true }, { name: 'Pioche', value: `${p.name} (Niv. ${lvl})`, inline: true }, { name: 'Pass', value: pass, inline: true }); for (const [key, val] of Object.entries(res)) embed.addFields({ name: miningData.resources[key]?.name || key, value: `${val}`, inline: true }); return message.channel.send({ embeds: [embed] }); }
       case 'afk': { const can = await economy.canClaimAfk(message.author.id); if (!can) return message.reply({ embeds: [createEmbed('Limite AFK atteinte', 'Tu as déjà utilisé tes 5h.')] }); const interval = setInterval(async () => { if (await economy.canClaimAfk(message.author.id)) await economy.claimAfk(message.author.id); else clearInterval(interval); }, 30000); return message.channel.send({ embeds: [createEmbed('Zone AFK activée', 'Gagne 20 Aure / 30 sec !')] }); }

@@ -1,1489 +1,969 @@
-const fs = require('fs');
+const { Client, GatewayIntentBits, Events, EmbedBuilder, SlashCommandBuilder, REST, Routes, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField, MessageFlags, StringSelectMenuBuilder, StringSelectMenuOptionBuilder } = require('discord.js');
+const mongoose = require('mongoose');
+const config = require('./config');
+const powers = require('./powers');
+const Economy = require('./economy');
+const CooldownManager = require('./cooldowns');
+const miningData = require('./miningData');
+const emojis = require('./emojis');
+const CooldownModel = require('./Cooldown');
 const http = require('http');
-const path = require('path');
-require('dotenv').config({ path: path.join(__dirname, '.env') });
-const { MongoClient } = require('mongodb');
-const {
-  loadLevelsFromFile,
-  saveUserLevelDataToFile,
-  getUserLevelDataFromFile
-} = require('./level-storage');
-const { DEFAULT_PREFIX, getCommandParts } = require('./command-prefix');
-const {
-  Client,
-  GatewayIntentBits,
-  Partials,
-  EmbedBuilder,
-  AttachmentBuilder,
-  ActionRowBuilder,
-  StringSelectMenuBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  ChannelType,
-  PermissionFlagsBits,
-  PermissionsBitField,
-  ApplicationCommandOptionType,
-  SlashCommandBuilder
-} = require('discord.js');
+
+process.on('unhandledRejection', (error) => console.error('Unhandled promise rejection:', error));
+process.on('uncaughtException', (error) => console.error('Uncaught Exception:', error));
+
+// Vérification du token et guild ID
+console.log('TOKEN LU :', config.token ? 'OUI (' + config.token.slice(0, 10) + '...)' : 'NON (vide)');
+console.log('GUILD LU :', config.guildId ? 'OUI' : 'NON (vide)');
+
+const ANARCHIE_MUTE_ROLE_ID = '1533505253608263681';
 
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.GuildMessageReactions,
-    GatewayIntentBits.MessageContent
-  ],
-  partials: [Partials.Message, Partials.Channel, Partials.Reaction]
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildModeration]
 });
 
-const prefix = DEFAULT_PREFIX;
-const adminIds = (process.env.ADMIN_IDS || '1497279403619647648,827492150760570883')
-  .split(',')
-  .map((id) => id.trim())
-  .filter(Boolean);
+const economy = new Economy();
+const cooldowns = new CooldownManager();
+const activeBingos = new Map();
+const miningSessions = new Map();
+const afkIntervals = new Map();
+const miningInvites = new Map();
+const miningTeams = new Map();
+const activeTrades = new Map();
+const serverEventMonsters = new Map();
+const eventVotes = new Map();
 
-const EMOJIS = {
-  success: '<a:VerifySecu:1537214710951321602>',
-  error: '<a:error:1537215138703220776>',
-  warn: '<a:Warning:1537215268802265229>',
-  info: '<:Info:1537215204939792404>',
-  ticket: '<:ticket:1533786391576838194>',
-  close: '🔒',
-  purge: '🧹',
-  rules: '📜',
-  tos: '📧',
-  welcome: '<:welcome:1537215076392767618>',
-  mod: '<:discord_moderator:1537215324766867516>',
-  logs: '📝',
-  categories: '📂',
-  help: '<:Discord_Helper:1191360487963775038>'
-};
+function createEmbed(title, description, color = config.embedColor) {
+  return new EmbedBuilder().setColor(color).setTitle(title).setDescription(description).setTimestamp();
+}
 
-const BOT_COLORS = {
-  default: '#5B6CFF',
-  success: '#3BA55D',
-  warn: '#F3C53D',
-  error: '#FF4D4D',
-  info: '#7A83FF',
-  background: '#1C1E25'
-};
+async function sendEmbed(channel, member, title, description, gifUrl = null, color = config.embedColor) {
+  const avatarURL = member.user ? member.user.displayAvatarURL({ dynamic: true }) : member.displayAvatarURL({ dynamic: true });
+  const name = member.displayName || member.username;
+  const embed = new EmbedBuilder().setColor(color).setAuthor({ name, iconURL: avatarURL }).setTitle(title).setDescription(description).setThumbnail(avatarURL).setTimestamp().setFooter({ text: 'Pouvoir activé' });
+  if (gifUrl) embed.setImage(gifUrl);
+  return channel.send({ embeds: [embed] });
+}
 
-function buildEmbed({ title, description, color = BOT_COLORS.default, footer = 'Elysium • Bot', thumbnail, image }) {
+async function logAction(guild, description) {
+  const logChannel = guild.channels.cache.get(config.logChannelId);
+  if (logChannel) {
+    const embed = new EmbedBuilder().setColor('#3498db').setTitle(`${emojis.info} Action`).setDescription(description).setTimestamp();
+    logChannel.send({ embeds: [embed] }).catch(() => {});
+  }
+}
+
+function calculateOreHP(floor, difficulty) {
+  const diff = miningData.difficulties[difficulty];
+  if (!diff) return 100;
+  return Math.floor(diff.hpBase * Math.pow(diff.hpGrowth, floor - 1));
+}
+
+function buildMineEmbed(session, pickaxe) {
+  const maxHP = session.currentOreMaxHP;
+  const currentHP = Math.max(0, session.currentOreHP);
+  const percent = maxHP > 0 ? currentHP / maxHP : 0;
+  const barLength = 20;
+  const filled = Math.round(percent * barLength);
+  const empty = barLength - filled;
+  const bar = '█'.repeat(filled) + '░'.repeat(empty);
+  const percentDisplay = Math.round(percent * 100);
+
   const embed = new EmbedBuilder()
-    .setTitle(title)
-    .setDescription(description)
-    .setColor(color)
-    .setFooter({ text: footer })
-    .setTimestamp();
+    .setColor(miningData.difficulties[session.difficulty]?.color || '#FFA500')
+    .setTitle(`${emojis.ore} ${session.currentOreName}`)
+    .addFields(
+      { name: '❤️ Points de vie', value: `${currentHP} / ${maxHP}`, inline: false },
+      { name: 'Barre de vie', value: `${bar} ${percentDisplay}%`, inline: false },
+      { name: 'Étage', value: `${session.floor}`, inline: true },
+      { name: 'Difficulté', value: `${session.difficulty}`, inline: true },
+      { name: 'Pioche', value: `${pickaxe.name} (${pickaxe.damageMin}-${pickaxe.damageMax} dmg)`, inline: true },
+      { name: 'Journal', value: session.lastActionLog.slice(0, 5).join('\n') || 'Aucune action récente.', inline: false }
+    )
+    .setFooter({ text: 'Boutons : Attaquer | Actualiser | Butin | Récupérer | Auto | Arrêter' });
 
-  if (thumbnail) embed.setThumbnail(thumbnail);
-  if (image) embed.setImage(image);
   return embed;
 }
 
-function infoEmbed(title, description) {
-  return buildEmbed({ title, description, color: BOT_COLORS.info, footer: 'Elysium • Info' });
-}
+mongoose.connect(config.mongoURI).then(() => console.log('✅ Connecté à MongoDB')).catch(err => console.error('❌ Erreur MongoDB:', err));
 
-function successEmbed(title, description) {
-  return buildEmbed({ title, description, color: BOT_COLORS.success, footer: 'Elysium • Succès' });
-}
+client.once(Events.ClientReady, async () => {
+  console.log(`✅ Connecté en tant que ${client.user.tag}`);
+  const logChannel = client.channels.cache.get(config.logChannelId);
+  if (logChannel) sendEmbed(logChannel, client.user, 'Bot en ligne', 'Le bot est prêt à gérer les pouvoirs.');
 
-function warningEmbed(title, description) {
-  return buildEmbed({ title, description, color: BOT_COLORS.warn, footer: 'Elysium • Attention' });
-}
-
-function errorEmbed(title, description) {
-  return buildEmbed({ title, description, color: BOT_COLORS.error, footer: 'Elysium • Erreur' });
-}
-
-const LEVEL_CHANNEL_ID = process.env.LEVEL_CHANNEL_ID || '1533511740183019550';
-const LEVEL_IMAGE_NAME = 'lvl.png';
-const XP_MIN_PER_MESSAGE = 5;
-const XP_MAX_PER_MESSAGE = 9;
-const AUTO_DELETE_CHANNEL_ID = process.env.AUTO_DELETE_CHANNEL_ID || '1533505601773113456';
-const MONGO_URI = (process.env.MONGO_URI || '').trim();
-const DB_NAME = (process.env.DB_NAME || 'elysium_bot').trim();
-const LEVELS_COLLECTION = 'levels';
-const lastMessageByChannel = new Map();
-const xpCooldowns = new Set();
-const COOLDOWN_TIME = 60_000;
-const LEVEL_ROLES = {
-  5: '🌱 Novice',
-  10: '🗨️ Habitué',
-  15: '⭐ Citoyen',
-  20: '⚔️ Aventurier',
-  30: '🛡️ Gardien',
-  40: '🔥 Vétéran',
-  50: '💎 Élite',
-  60: '👑 Champion',
-  70: '🌟 Héros',
-  80: '⚜️ Légende',
-  90: '🏛️ Mythique',
-  100: '🌌 Immortel',
-  110: '🚀 Ascendant'
-};
-let mongoClient = null;
-let levelsCollection = null;
-
-const guildId = process.env.GUILD_ID || null;
-const welcomeChannelId = process.env.WELCOME_CHANNEL_ID || '1533505331177590814';
-const logsChannelId = process.env.LOGS_CHANNEL_ID || '1533505620836220998';
-const ticketPanelChannelId = process.env.TICKET_PANEL_CHANNEL_ID || null;
-
-const dataDir = path.join(__dirname, 'data');
-const warningsFile = path.join(dataDir, 'warnings.json');
-const ticketPanelFile = path.join(dataDir, 'ticket-panel.json');
-const levelsFile = path.join(dataDir, 'levels.json');
-const transcriptDir = path.join(dataDir, 'transcripts');
-
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
-}
-
-if (!fs.existsSync(warningsFile)) {
-  fs.writeFileSync(warningsFile, JSON.stringify({}, null, 2));
-}
-
-if (!fs.existsSync(ticketPanelFile)) {
-  fs.writeFileSync(ticketPanelFile, JSON.stringify({}, null, 2));
-}
-
-if (!fs.existsSync(levelsFile)) {
-  fs.writeFileSync(levelsFile, JSON.stringify({}, null, 2));
-}
-
-if (!fs.existsSync(transcriptDir)) {
-  fs.mkdirSync(transcriptDir, { recursive: true });
-}
-
-const TICKET_CATEGORIES = [
-  { emoji: '💰', value: 'aide-economie', label: 'Aide économie' },
-  { emoji: '🛠️', value: 'aide', label: 'Aide' },
-  { emoji: '🎁', value: 'giveaway', label: 'Giveaway' },
-  { emoji: '📌', value: 'claim', label: 'Claim' }
-];
-
-const STAFF_ROLE_IDS = ['1533835913065398333', '1533499987810324571', '1533836673430065282'];
-
-const TICKET_REPLIES = {
-  'aide-economie': [
-    'Je prépare un ticket économique, tiens-toi prêt !',
-    'Analyse en cours… Ton ticket économie arrive dans quelques secondes.',
-    'Hop, création du ticket pour ton besoin d’économie !'
-  ],
-  'aide': [
-    'Je viens en aide ! Je crée ton ticket immédiatement.',
-    'Ouverture du ticket d’assistance en cours, reste connecté.',
-    'C’est parti, ton support arrive.'
-  ],
-  'giveaway': [
-    'Préparation du ticket de giveaway… bonne chance !',
-    'Un ticket giveaway est en route pour toi.',
-    'Je lance ton ticket giveaway, reste prêt.'
-  ],
-  'claim': [
-    'Ticket claim créé, on vérifie ta demande.',
-    'J’ouvre ton ticket claim maintenant.',
-    'Seulement quelques secondes avant l’ouverture de ton ticket claim.'
-  ]
-};
-
-function isAdmin(userId) {
-  return adminIds.includes(userId);
-}
-
-function hasStaffRole(member) {
-  if (!member?.roles?.cache) return false;
-  return member.roles.cache.some((role) => STAFF_ROLE_IDS.includes(role.id));
-}
-
-function loadWarnings() {
-  try {
-    return JSON.parse(fs.readFileSync(warningsFile, 'utf8'));
-  } catch {
-    return {};
-  }
-}
-
-function saveWarnings(data) {
-  fs.writeFileSync(warningsFile, JSON.stringify(data, null, 2));
-}
-
-function loadTicketPanels() {
-  try {
-    return JSON.parse(fs.readFileSync(ticketPanelFile, 'utf8'));
-  } catch {
-    return {};
-  }
-}
-
-function saveTicketPanels(data) {
-  fs.writeFileSync(ticketPanelFile, JSON.stringify(data, null, 2));
-}
-
-function sanitizeTranscriptName(value) {
-  return String(value).replace(/[^a-z0-9._-]/gi, '_');
-}
-
-function getTicketTranscriptPath(channel) {
-  return path.join(transcriptDir, `${channel.id}-${sanitizeTranscriptName(channel.name)}.log`);
-}
-
-function appendTicketTranscript(channel, line) {
-  try {
-    fs.appendFileSync(getTicketTranscriptPath(channel), `${line}\n`);
-  } catch (error) {
-    console.error('❌ Erreur lors de l’écriture du transcript de ticket :', error.message);
-  }
-}
-
-function writeTicketTranscriptHeader(channel, user, categoryValue) {
-  const header = [
-    '=== Transcript de ticket ===',
-    `Salon: #${channel.name}`,
-    `Créé par: ${user?.tag || user?.username || 'inconnu'}`,
-    `Catégorie: ${categoryValue}`,
-    `Date: ${new Date().toISOString()}`,
-    ''
+  const commands = [
+    new SlashCommandBuilder().setName('test').setDescription('Vérifier que le bot répond.'),
+    new SlashCommandBuilder().setName('testapi').setDescription('Retire 500 Élys à un membre (test API).').addUserOption(option => option.setName('membre').setDescription('Le membre à qui retirer 500 Élys.').setRequired(true)),
+    new SlashCommandBuilder().setName('prix').setDescription('Affiche la liste des pouvoirs et prix.'),
+    new SlashCommandBuilder().setName('guide').setDescription('Affiche le guide des commandes.'),
+    new SlashCommandBuilder().setName('cmdp').setDescription('Voir les commandes des pouvoirs.'),
+    new SlashCommandBuilder().setName('bank').setDescription('Gérer ta banque')
+      .addSubcommand(sub => sub.setName('deposit').setDescription('Déposer de l\'argent (taxe 20%).').addIntegerOption(opt => opt.setName('montant').setDescription('Montant à déposer.').setRequired(true)))
+      .addSubcommand(sub => sub.setName('withdraw').setDescription('Retirer de l\'argent.').addIntegerOption(opt => opt.setName('montant').setDescription('Montant à retirer.').setRequired(true)))
+      .addSubcommand(sub => sub.setName('balance').setDescription('Voir ton solde bancaire.'))
+      .addSubcommand(sub => sub.setName('pret').setDescription('Faire un prêt (max 50 000 Élys, 2 jours max).').addIntegerOption(opt => opt.setName('montant').setDescription('Montant à emprunter.').setRequired(true)).addIntegerOption(opt => opt.setName('jours').setDescription('Durée de remboursement (max 2).').setRequired(true)))
+      .addSubcommand(sub => sub.setName('dette').setDescription('Voir tes dettes.'))
+      .addSubcommand(sub => sub.setName('rembourser').setDescription('Rembourser une partie ou toute ta dette.').addIntegerOption(opt => opt.setName('montant').setDescription('Montant à rembourser.').setRequired(true))),
+    new SlashCommandBuilder().setName('pioche').setDescription('Gérer ta pioche.')
+      .addSubcommand(sub => sub.setName('info').setDescription('Voir les stats de ta pioche.'))
+      .addSubcommand(sub => sub.setName('upgrade').setDescription('Améliorer ta pioche.'))
+      .addSubcommand(sub => sub.setName('use').setDescription('Utiliser une pioche possédée')),
+    new SlashCommandBuilder().setName('mine').setDescription('Lancer une session de minage').addUserOption(option => option.setName('membre').setDescription('Inviter un membre à rejoindre ton équipe (optionnel)').setRequired(false)),
+    new SlashCommandBuilder().setName('craft').setDescription('Fabriquer un objet').addStringOption(option => option.setName('objet').setDescription('Objet à fabriquer').setRequired(true).addChoices({ name: 'Auto-Mine Pass', value: 'auto_mine_pass' }, { name: 'Drop x2', value: 'drop' })),
+    new SlashCommandBuilder().setName('inventaire').setDescription('Voir ton inventaire.'),
+    new SlashCommandBuilder().setName('afk').setDescription('Aller en zone AFK pour gagner des Aure.'),
+    new SlashCommandBuilder().setName('trade').setDescription('Échanger des objets avec un autre membre').addUserOption(opt => opt.setName('membre').setDescription('Le membre avec qui échanger').setRequired(true)),
+    new SlashCommandBuilder().setName('removedette').setDescription('[ADMIN] Retirer les dettes d\'un membre.')
+      .addUserOption(opt => opt.setName('membre').setDescription('Le membre dont on retire les dettes.').setRequired(true))
+      .addStringOption(opt => opt.setName('le_quel').setDescription('Quelle dette ? Tout ou un nombre précis.').setRequired(true).addChoices(
+        { name: 'Tout', value: 'tout' },
+        { name: 'Nombre', value: 'nombre' }
+      ))
+      .addIntegerOption(opt => opt.setName('montant').setDescription('Le montant à retirer (si "Nombre").').setRequired(false)),
+    new SlashCommandBuilder().setName('addmine').setDescription('[ADMIN] Ajouter une mine à un membre')
+      .addUserOption(opt => opt.setName('membre').setDescription('Membre').setRequired(true))
+      .addIntegerOption(opt => opt.setName('etage').setDescription('Étage').setRequired(true)),
+    new SlashCommandBuilder().setName('removemine').setDescription('[ADMIN] Supprimer une mine à un membre')
+      .addUserOption(opt => opt.setName('membre').setDescription('Membre').setRequired(true))
+      .addIntegerOption(opt => opt.setName('etage').setDescription('Étage à supprimer').setRequired(true)),
+    new SlashCommandBuilder().setName('downgradepioche').setDescription('[ADMIN] Rétrograder la pioche d\'un membre')
+      .addUserOption(opt => opt.setName('membre').setDescription('Membre').setRequired(true))
+      .addIntegerOption(opt => opt.setName('level').setDescription('Niveau de pioche').setRequired(true))
+      .addStringOption(opt => opt.setName('raison').setDescription('Raison').setRequired(true)),
+    new SlashCommandBuilder().setName('pileouface').setDescription('Jouer à pile ou face contre un membre.').addUserOption(opt => opt.setName('adversaire').setDescription('Adversaire.').setRequired(true)).addIntegerOption(opt => opt.setName('mise').setDescription('Mise en Élys.').setRequired(true)),
+    new SlashCommandBuilder().setName('bingo').setDescription('Lance un bingo avec une récompense personnalisée').addStringOption(opt => opt.setName('recompense').setDescription('Description de la récompense').setRequired(true)).addIntegerOption(opt => opt.setName('duree').setDescription('Durée en secondes (défaut 60)').setRequired(false)),
+    new SlashCommandBuilder().setName('cooldowns').setDescription('Voir tes cooldowns.'),
+    new SlashCommandBuilder().setName('etat').setDescription('Voir ton état.'),
+    new SlashCommandBuilder().setName('historique').setDescription('Voir tes 10 dernières transactions.'),
+    new SlashCommandBuilder().setName('stats').setDescription('Voir tes statistiques.'),
+    new SlashCommandBuilder().setName('resetcd').setDescription('Réinitialiser les cooldowns d\'un membre (admin).').addUserOption(opt => opt.setName('membre').setDescription('Membre').setRequired(true)),
+    new SlashCommandBuilder().setName('seirei').setDescription('Activer le pouvoir Elys.'),
+    new SlashCommandBuilder().setName('kama').setDescription('Tenter de voler tout l\'Élys d\'un membre.').addUserOption(opt => opt.setName('cible').setDescription('Cible').setRequired(true)),
+    new SlashCommandBuilder().setName('tsuiseki').setDescription('Défier un membre en pile ou face.').addUserOption(opt => opt.setName('adversaire').setDescription('Adversaire').setRequired(true)).addIntegerOption(opt => opt.setName('mise').setDescription('Mise').setRequired(true)),
+    new SlashCommandBuilder().setName('ishii').setDescription('Transférer le malus d\'un joueur à un autre.').addUserOption(opt => opt.setName('source').setDescription('Source').setRequired(true)).addUserOption(opt => opt.setName('cible').setDescription('Cible').setRequired(true)),
+    new SlashCommandBuilder().setName('bunri').setDescription('Retirer tous tes malus.'),
+    new SlashCommandBuilder().setName('fuuin').setDescription('Débloquer le rôle de revenu quotidien.'),
+    new SlashCommandBuilder().setName('yoroi').setDescription('Doubler ta balance.'),
+    new SlashCommandBuilder().setName('honoo').setDescription('Brûler 5% de l\'Élys d\'un membre.').addUserOption(opt => opt.setName('cible').setDescription('Cible').setRequired(true)),
+    new SlashCommandBuilder().setName('konton').setDescription('Anarchie : malus -5000 Élys à tous.'),
+    new SlashCommandBuilder().setName('anarchie_mute').setDescription('Anarchie : mute local 1 minute.'),
+    new SlashCommandBuilder().setName('hanamai').setDescription('Activer Danse des fleurs.')
   ];
 
-  fs.writeFileSync(getTicketTranscriptPath(channel), header.join('\n'));
-}
-
-function loadLevels() {
+  const rest = new REST({ version: '10' }).setToken(config.token);
   try {
-    return JSON.parse(fs.readFileSync(levelsFile, 'utf8'));
-  } catch {
-    return {};
-  }
-}
-
-function saveLevels(data) {
-  fs.writeFileSync(levelsFile, JSON.stringify(data, null, 2));
-}
-
-function getUserWarnings(guildWarnings, userId) {
-  return guildWarnings[userId] || [];
-}
-
-function xpToNextLevel(level) {
-  return 50 + level * 25;
-}
-
-function getXpGainForMessage() {
-  return Math.floor(Math.random() * (XP_MAX_PER_MESSAGE - XP_MIN_PER_MESSAGE + 1)) + XP_MIN_PER_MESSAGE;
-}
-
-async function sendLevelUpMessage(guild, user, level, xpGained) {
-  const channel = guild.channels.cache.get(LEVEL_CHANNEL_ID) || await guild.channels.fetch(LEVEL_CHANNEL_ID).catch(() => null);
-  if (!channel || !channel.isTextBased()) return;
-
-  const attachment = new AttachmentBuilder(path.join(__dirname, 'assets', LEVEL_IMAGE_NAME)).setName(LEVEL_IMAGE_NAME);
-  const embed = new EmbedBuilder()
-    .setColor(BOT_COLORS.success)
-    .setTitle(`${EMOJIS.success} Niveau supérieur !`)
-    .setDescription(`Bravo **${user.tag}** ! Tu viens de passer niveau **${level}**.`)
-    .setThumbnail(user.displayAvatarURL({ dynamic: true, size: 256 }))
-    .addFields(
-      { name: 'XP gagnée', value: `+${xpGained} XP`, inline: true },
-      { name: 'Nouveau niveau', value: `Niveau ${level}`, inline: true }
-    )
-    .setFooter({ text: 'Elysium • Progression' })
-    .setImage(`attachment://${LEVEL_IMAGE_NAME}`)
-    .setTimestamp();
-
-  await channel.send({ embeds: [embed], files: [attachment] });
-}
-
-async function initMongo() {
-  if (!MONGO_URI) {
-    console.warn('⚠️  MONGO_URI non configurée. Les données de niveau seront en mémoire uniquement.');
-    return;
-  }
-  if (mongoClient) return;
-
-  try {
-    console.log('🔗 Tentative de connexion à MongoDB...');
-    mongoClient = new MongoClient(MONGO_URI, { serverSelectionTimeoutMS: 5000 });
-    await mongoClient.connect();
-    const db = mongoClient.db(DB_NAME);
-    levelsCollection = db.collection(LEVELS_COLLECTION);
-    await levelsCollection.createIndex({ guildId: 1, userId: 1 }, { unique: true });
-    console.log('✅ MongoDB connecté avec succès !');
+    console.log('Enregistrement des commandes slash...');
+    await rest.put(Routes.applicationGuildCommands(client.user.id, config.guildId), { body: commands });
+    console.log('✅ Commandes slash enregistrées.');
   } catch (error) {
-    console.error('❌ Erreur de connexion MongoDB:', error.message);
-    mongoClient = null;
-    levelsCollection = null;
+    console.error('Erreur lors de l\'enregistrement des commandes slash:', error);
   }
-}
+});
 
-async function getUserLevelData(guildId, userId) {
-  if (levelsCollection) {
+client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
+  const guild = newMember.guild;
+  if (guild.id !== config.guildId) return;
+  const addedRoles = newMember.roles.cache.filter(role => !oldMember.roles.cache.has(role.id));
+  for (const role of addedRoles.values()) {
+    const power = powers.find(p => p.roleId === role.id);
+    if (!power) continue;
+    if (!power.autoTrigger) {
+      const channel = guild.systemChannel || guild.channels.cache.find(c => c.isTextBased());
+      if (channel) sendEmbed(channel, newMember, `Pouvoir ${power.name} obtenu`, `Utilisez la commande correspondante pour activer ce pouvoir.`);
+      continue;
+    }
+    if (power.cooldownDays > 0 && await cooldowns.isOnCooldown(newMember.id, power.name, power.cooldownDays)) {
+      const remaining = await cooldowns.getRemaining(newMember.id, power.name, power.cooldownDays);
+      await newMember.roles.remove(role).catch(() => {});
+      await newMember.send({ embeds: [createEmbed('Cooldown actif', `Le pouvoir **${power.name}** est encore en cooldown.\nTemps restant : ${cooldowns.formatRemaining(remaining)}`)] }).catch(() => {});
+      continue;
+    }
     try {
-      const record = await levelsCollection.findOne({ guildId, userId });
-      return record || { xp: 0, level: 1 };
+      const result = await power.execute(newMember, guild, { economy, cooldowns, config });
+      const channel = guild.systemChannel || guild.channels.cache.find(c => c.isTextBased());
+      if (channel) await sendEmbed(channel, newMember, `${power.emoji} ${power.name}`, result.message, power.gifUrl, power.color || config.embedColor);
+      if (power.cooldownDays > 0 && result.success) await cooldowns.setCooldown(newMember.id, power.name);
+      if (power.usage === 'consommable') await newMember.roles.remove(role).catch(() => {});
+      if (result.success) {
+        await economy.incrementPowerUsage(newMember.id);
+        await logAction(guild, `${newMember.user.tag} a utilisé le pouvoir ${power.name} (auto).`);
+      }
     } catch (error) {
-      console.error('❌ Erreur lors de la lecture des données de niveau:', error.message);
+      console.error(`Erreur pour ${power.name}:`, error);
     }
   }
+});
+client.on(Events.InteractionCreate, async (interaction) => {
+  try {
+    // --- GESTION DU TRADE : MENU DÉROULANT ---
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith('trade_select_')) {
+      const parts = interaction.customId.split('_');
+      const tradeId = parts[2];
+      let trade = activeTrades.get(tradeId);
+      if (!trade) {
+        const user = await economy.getUser(interaction.user.id);
+        trade = user.activeTrades.find(t => t.id === tradeId);
+        if (trade) activeTrades.set(tradeId, trade);
+      }
+      if (!trade) return interaction.reply({ content: "Cet échange n'existe plus.", flags: MessageFlags.Ephemeral });
 
-  return getUserLevelDataFromFile(levelsFile, guildId, userId);
-}
+      const isUser1 = interaction.user.id === trade.user1;
+      const isUser2 = interaction.user.id === trade.user2;
+      if (!isUser1 && !isUser2) return interaction.reply({ content: "Tu ne participes pas à cet échange.", flags: MessageFlags.Ephemeral });
 
-async function saveUserLevelData(guildId, userId, data) {
-  if (levelsCollection) {
-    try {
-      await levelsCollection.updateOne(
-        { guildId, userId },
-        { $set: { guildId, userId, ...data } },
-        { upsert: true }
-      );
+      const currentUserKey = isUser1 ? 'offer1' : 'offer2';
+      const currentValidKey = isUser1 ? 'validated1' : 'validated2';
+
+      const resKey = interaction.values[0];
+      const resInfo = miningData.resources[resKey];
+      const resCount = await economy.getResource(interaction.user.id, resKey);
+      if (resCount <= 0) return interaction.reply({ content: "Tu n'as pas ce matériau.", flags: MessageFlags.Ephemeral });
+
+      trade[currentUserKey].push({ type: 'materiaux', name: resInfo.name, value: 1, resourceKey: resKey });
+      trade[currentValidKey] = false;
+
+      await updateTradeEmbed(interaction, trade);
       return;
-    } catch (error) {
-      console.error('❌ Erreur lors de la sauvegarde des données de niveau:', error.message);
-    }
-  }
-
-  saveUserLevelDataToFile(levelsFile, guildId, userId, data);
-}
-
-function createProgressBar(current, max, size = 10) {
-  const percentage = Math.min(Math.max(current / max, 0), 1);
-  const progress = Math.round(size * percentage);
-  const emptyProgress = size - progress;
-  return '█'.repeat(progress) + '░'.repeat(emptyProgress);
-}
-
-// Fonction améliorée pour attribuer le rôle de niveau correspondant
-async function assignLevelRole(guild, member, level) {
-  // Trouver le rôle le plus élevé que le membre devrait avoir
-  let roleToAssign = null;
-  
-  // Parcourir les paliers de niveau du plus haut au plus bas
-  const sortedLevels = Object.keys(LEVEL_ROLES)
-    .map(Number)
-    .sort((a, b) => b - a); // tri décroissant
-  
-  for (const threshold of sortedLevels) {
-    if (level >= threshold) {
-      const roleName = LEVEL_ROLES[threshold];
-      roleToAssign = guild.roles.cache.find((r) => r.name === roleName);
-      break;
-    }
-  }
-  
-  // Retirer tous les rôles de niveau existants
-  const allLevelRoleNames = Object.values(LEVEL_ROLES);
-  const rolesToRemove = member.roles.cache.filter((r) => allLevelRoleNames.includes(r.name));
-  
-  if (rolesToRemove.size > 0) {
-    await member.roles.remove(rolesToRemove).catch(() => null);
-  }
-  
-  // Ajouter le nouveau rôle si trouvé
-  if (roleToAssign) {
-    await member.roles.add(roleToAssign).catch(() => null);
-  }
-}
-
-async function processLevel(message) {
-  if (!message.guild || message.author.bot) return;
-  if (xpCooldowns.has(message.author.id)) return;
-
-  await initMongo();
-  const userId = message.author.id;
-  const guildId = message.guild.id;
-  const userData = await getUserLevelData(guildId, userId);
-  const xpGained = getXpGainForMessage();
-
-  userData.xp = (userData.xp || 0) + xpGained;
-
-  const target = xpToNextLevel(userData.level || 1);
-  if (userData.xp >= target) {
-    userData.xp -= target;
-    userData.level = (userData.level || 1) + 1;
-    await sendLevelUpMessage(message.guild, message.author, userData.level, xpGained);
-
-    // Attribution du rôle de niveau
-    const member = await message.guild.members.fetch(userId).catch(() => null);
-    if (member) {
-      await assignLevelRole(message.guild, member, userData.level);
-    }
-  }
-
-  await saveUserLevelData(guildId, userId, userData);
-  xpCooldowns.add(message.author.id);
-  setTimeout(() => xpCooldowns.delete(message.author.id), COOLDOWN_TIME);
-}
-
-function addWarning(guildIdValue, userId, moderatorId, reason) {
-  const warnings = loadWarnings();
-  const guildWarnings = warnings[guildIdValue] || {};
-  const userWarnings = getUserWarnings(guildWarnings, userId);
-
-  userWarnings.push({
-    id: Date.now(),
-    userId,
-    moderatorId,
-    reason: reason || 'Aucune raison fournie',
-    date: new Date().toISOString()
-  });
-
-  guildWarnings[userId] = userWarnings;
-  warnings[guildIdValue] = guildWarnings;
-  saveWarnings(warnings);
-  return userWarnings;
-}
-
-function clearWarnings(guildIdValue, userId) {
-  const warnings = loadWarnings();
-  const guildWarnings = warnings[guildIdValue] || {};
-  delete guildWarnings[userId];
-  warnings[guildIdValue] = guildWarnings;
-  saveWarnings(warnings);
-}
-
-function formatTimestamp(date) {
-  return `<t:${Math.floor(date.getTime() / 1000)}:f>`;
-}
-
-async function purgeChannel(channel, maxMessages = null) {
-  let deleted = 0;
-  let beforeId = null;
-
-  while (true) {
-    const options = { limit: 100 };
-    if (beforeId) {
-      options.before = beforeId;
     }
 
-    const fetched = await channel.messages.fetch(options).catch(() => null);
-    if (!fetched || fetched.size === 0) break;
+    // --- GESTION DU TRADE : BOUTONS ---
+    if (interaction.isButton() && interaction.customId.startsWith('trade_')) {
+      const parts = interaction.customId.split('_');
+      const action = parts[1];
+      const tradeId = parts[2];
+      let trade = activeTrades.get(tradeId);
+      if (!trade) {
+        const user = await economy.getUser(interaction.user.id);
+        trade = user.activeTrades.find(t => t.id === tradeId);
+        if (trade) activeTrades.set(tradeId, trade);
+      }
+      if (!trade) return interaction.reply({ content: "Cet échange n'existe plus.", flags: MessageFlags.Ephemeral });
 
-    const messages = Array.from(fetched.values());
-    beforeId = messages[messages.length - 1]?.id;
+      const isUser1 = interaction.user.id === trade.user1;
+      const isUser2 = interaction.user.id === trade.user2;
+      if (!isUser1 && !isUser2) return interaction.reply({ content: "Tu ne participes pas à cet échange.", flags: MessageFlags.Ephemeral });
 
-    if (maxMessages !== null && deleted >= maxMessages) break;
+      const currentUserKey = isUser1 ? 'offer1' : 'offer2';
+      const currentValidKey = isUser1 ? 'validated1' : 'validated2';
 
-    const bulkable = messages.filter((msg) => !msg.pinned && Date.now() - msg.createdTimestamp < 14 * 24 * 60 * 60 * 1000);
-    const toDelete = bulkable.slice(0, maxMessages !== null ? Math.max(0, maxMessages - deleted) : bulkable.length);
+      if (action === 'pickaxe') {
+        const pickLevel = await economy.getPickaxeLevel(interaction.user.id);
+        const pick = miningData.pickaxeLevels.find(p => p.level === pickLevel);
+        trade[currentUserKey] = trade[currentUserKey].filter(item => item.type !== 'pioche');
+        trade[currentUserKey].push({ type: 'pioche', name: pick.name, value: pick.level });
+        trade[currentValidKey] = false;
+      }
 
-    if (toDelete.length > 0) {
-      const result = await channel.bulkDelete(toDelete, true).catch(() => null);
-      deleted += result?.size || toDelete.length;
+      if (action === 'materials') {
+        const selectRow = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder().setCustomId(`trade_select_${tradeId}`).setPlaceholder('Choisis un matériau').addOptions(
+            Object.entries(miningData.resources).map(([key, res]) => new StringSelectMenuOptionBuilder().setLabel(res.name).setValue(key))
+          )
+        );
+        return interaction.reply({ content: 'Choisis un matériau à ajouter :', components: [selectRow], flags: MessageFlags.Ephemeral });
+      }
+
+      if (action === 'validate') {
+        trade[currentValidKey] = true;
+        if (trade.validated1 && trade.validated2) {
+          activeTrades.delete(tradeId);
+          await economy.deleteSavedTrade(trade.user1, tradeId);
+          await economy.deleteSavedTrade(trade.user2, tradeId);
+
+          // Transfert des biens (PIOCHE NON CONSOMMÉE pour le donneur)
+          for (const item of trade.offer1) {
+            if (item.type === 'pioche') {
+              // Le receveur reçoit la pioche, mais le donneur la GARDE
+              await economy.addOwnedPickaxe(trade.user2, item.value);
+            } else if (item.type === 'materiaux') {
+              await economy.removeResource(trade.user1, item.resourceKey, item.value);
+              await economy.addResource(trade.user2, item.resourceKey, item.value);
+            }
+          }
+          for (const item of trade.offer2) {
+            if (item.type === 'pioche') {
+              await economy.addOwnedPickaxe(trade.user1, item.value);
+            } else if (item.type === 'materiaux') {
+              await economy.removeResource(trade.user2, item.resourceKey, item.value);
+              await economy.addResource(trade.user1, item.resourceKey, item.value);
+            }
+          }
+
+          return interaction.update({ content: 'Échange réussi !', embeds: [], components: [] });
+        } else {
+          return interaction.reply({ content: "Ton offre est validée ! Attends l'autre joueur.", flags: MessageFlags.Ephemeral });
+        }
+      }
+
+      if (action === 'cancel') {
+        activeTrades.delete(tradeId);
+        await economy.deleteSavedTrade(trade.user1, tradeId);
+        await economy.deleteSavedTrade(trade.user2, tradeId);
+        return interaction.update({ content: 'Échange annulé.', embeds: [], components: [] });
+      }
+
+      if (action === 'clear') {
+        trade[currentUserKey] = [];
+        trade[currentValidKey] = false;
+      }
+
+      await updateTradeEmbed(interaction, trade);
+      return;
     }
 
-    const remaining = messages.filter((msg) => !toDelete.some((target) => target.id === msg.id));
-    for (const message of remaining) {
-      if (maxMessages !== null && deleted >= maxMessages) break;
-      await message.delete().catch(() => {});
-      deleted += 1;
+    // --- BOUTONS DES ÉVÉNEMENTS ---
+    if (interaction.isButton() && interaction.customId.startsWith('event_')) {
+      // Attaque de l'Aure
+      if (interaction.customId === 'event_attack_aure') {
+        const monster = serverEventMonsters.get('aure');
+        if (!monster) return interaction.reply({ content: "L'Aure est déjà vaincu !", flags: MessageFlags.Ephemeral });
+        const pickLevel = await economy.getPickaxeLevel(interaction.user.id);
+        const pick = miningData.pickaxeLevels.find(p => p.level === pickLevel) || { damageMin: 1, damageMax: 1 };
+        const damage = Math.floor(Math.random() * (pick.damageMax - pick.damageMin + 1)) + pick.damageMin;
+        
+        monster.hp -= damage;
+        if (monster.hp <= 0) {
+          serverEventMonsters.delete('aure');
+          await economy.addBalance(interaction.user.id, monster.reward);
+          await interaction.update({ embeds: [createEmbed('💎 Victoire !', `L'Aure est vaincu ! ${interaction.user} gagne ${monster.reward} Élys !`)], components: [] });
+          return;
+        }
+        const embed = new EmbedBuilder().setColor('#FFA500').setTitle('💎 Aure sauvage')
+          .setDescription(`**PV :** ${monster.hp}/${monster.maxHp}\n\n**Récompense :** ${monster.reward} Élys`);
+        await interaction.update({ embeds: [embed] });
+        return;
+      }
+
+      // Attaque du Boss KO
+      if (interaction.customId === 'event_attack_boss_ko') {
+        const monster = serverEventMonsters.get('boss_ko');
+        if (!monster) return interaction.reply({ content: "Boss déjà vaincu !", flags: MessageFlags.Ephemeral });
+
+        const stunKey = `stun_${interaction.user.id}`;
+        if (Date.now() < (global[stunKey] || 0)) {
+          return interaction.reply({ content: "😵 Tu es KO ! Tu ne peux plus attaquer pendant 10 secondes.", flags: MessageFlags.Ephemeral });
+        }
+
+        const pickLevel = await economy.getPickaxeLevel(interaction.user.id);
+        const pick = miningData.pickaxeLevels.find(p => p.level === pickLevel) || { damageMin: 1, damageMax: 1 };
+        const damage = Math.floor(Math.random() * (pick.damageMax - pick.damageMin + 1)) + pick.damageMin;
+        
+        monster.hp -= damage;
+        if (Math.random() < 0.2) {
+          global[stunKey] = Date.now() + 10000;
+          await interaction.reply({ content: `😵 Le Boss t'a mis KO ! Tu ne peux plus attaquer pendant 10 secondes.`, flags: MessageFlags.Ephemeral });
+        }
+
+        if (monster.hp <= 0) {
+          serverEventMonsters.delete('boss_ko');
+          await economy.addBalance(interaction.user.id, 15000);
+          await interaction.update({ embeds: [createEmbed('🏆 Boss KO vaincu !', `Bravo ${interaction.user}, tu as gagné 15 000 Élys !`)], components: [] });
+          return;
+        }
+        const embed = new EmbedBuilder().setColor('#e74c3c').setTitle('👹 Boss KO')
+          .setDescription(`**PV :** ${monster.hp}/${monster.maxHp}\n\nIl peut vous mettre KO !`);
+        await interaction.update({ embeds: [embed] });
+        return;
+      }
+
+      // Attaque du Boss Final
+      if (interaction.customId === 'event_attack_boss_final') {
+        const monster = serverEventMonsters.get('boss_final');
+        if (!monster) return interaction.reply({ content: "Boss final déjà vaincu !", flags: MessageFlags.Ephemeral });
+        const pickLevel = await economy.getPickaxeLevel(interaction.user.id);
+        const pick = miningData.pickaxeLevels.find(p => p.level === pickLevel) || { damageMin: 1, damageMax: 1 };
+        const damage = Math.floor(Math.random() * (pick.damageMax - pick.damageMin + 1)) + pick.damageMin;
+        
+        monster.hp -= damage;
+        if (monster.hp <= 0) {
+          serverEventMonsters.delete('boss_final');
+          const reward = Math.floor(Math.random() * (12000 - 7500 + 1)) + 7500;
+          await economy.addBalance(interaction.user.id, reward);
+          await interaction.update({ embeds: [createEmbed('☠️ BOSS FINAL VAINCU !', `Ok, bravo ! Vous êtes à la moitié de la mine. Je vous laisse ici, on se reverra très bientôt…\n\n${interaction.user} a gagné ${reward} Élys !`)], components: [] });
+          return;
+        }
+        const embed = new EmbedBuilder().setColor('#c0392b').setTitle('☠️ BOSS FINAL')
+          .setDescription(`**PV :** ${monster.hp}/${monster.maxHp}`);
+        await interaction.update({ embeds: [embed] });
+        return;
+      }
+
+      // Choix Oui/Non (Événement 4)
+      if (interaction.customId === 'event_yes' || interaction.customId === 'event_no') {
+        const choice = interaction.customId === 'event_yes' ? 'yes' : 'no';
+        const votes = eventVotes.get('choix4');
+        if (!votes) return interaction.reply({ content: "Le vote est terminé !", flags: MessageFlags.Ephemeral });
+        
+        if (choice === 'yes') votes.yes++;
+        else votes.no++;
+
+        if (votes.yes >= 2) {
+          eventVotes.delete('choix4');
+          return interaction.update({ embeds: [createEmbed('🪻 La suite...', "D'accord, mais ne dites pas que je ne vous ai pas prévenus...")], components: [] });
+        } else {
+          return interaction.reply({ content: "Vote enregistré !", flags: MessageFlags.Ephemeral });
+        }
+      }
     }
 
-    if (messages.length < 100 || (maxMessages !== null && deleted >= maxMessages)) break;
+    // --- MINE : SELECT MENU ---
+    if (interaction.isStringSelectMenu()) {
+      if (interaction.customId.startsWith('mine_select_')) {
+        const difficulty = interaction.values[0];
+        const userId = interaction.customId.split('_')[2];
+        if (interaction.user.id !== userId) return interaction.reply({ content: "Ce n'est pas ta session.", flags: MessageFlags.Ephemeral });
+        const diff = miningData.difficulties[difficulty];
+        if (!diff) return interaction.reply({ content: 'Difficulté inconnue.', flags: MessageFlags.Ephemeral });
+        const team = miningTeams.get(userId) || [];
+        miningTeams.delete(userId);
+        const floor = 1;
+        const hp = calculateOreHP(floor, difficulty);
+        const rewardMin = Math.floor(diff.minReward * (1 + floor * 0.1));
+        const rewardMax = Math.floor(diff.maxReward * (1 + floor * 0.1));
+        const reward = Math.floor(Math.random() * (rewardMax - rewardMin + 1)) + rewardMin;
+        const oreName = miningData.oreNames[difficulty][Math.floor(Math.random() * miningData.oreNames[difficulty].length)];
+        const session = { userId: interaction.user.id, difficulty, floor, currentOreName: oreName, currentOreHP: hp, currentOreMaxHP: hp, currentOreReward: reward, loot: [], autoMine: false, autoMineInterval: null, lastActionLog: [], message: null, teamMembers: team };
+        const pickaxeLevel = await economy.getPickaxeLevel(interaction.user.id);
+        const pickaxe = miningData.pickaxeLevels.find(p => p.level === pickaxeLevel) || { name: "Inconnue", rarity: "?", damageMin: 1, damageMax: 1 };
+        const embed = buildMineEmbed(session, pickaxe);
+        const row1 = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`mine_attack_${interaction.user.id}`).setLabel('Attaquer').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId(`mine_refresh_${interaction.user.id}`).setLabel('Actualiser').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`mine_loot_${interaction.user.id}`).setLabel('Butin').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`mine_claim_${interaction.user.id}`).setLabel('Récupérer').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId(`mine_auto_${interaction.user.id}`).setLabel('Auto').setStyle(ButtonStyle.Primary)
+        );
+        const row2 = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`mine_stop_${interaction.user.id}`).setLabel('Arrêter').setStyle(ButtonStyle.Danger));
+        const sentMessage = await interaction.channel.send({ embeds: [embed], components: [row1, row2] });
+        session.message = sentMessage;
+        miningSessions.set(sentMessage.id, session);
+        return interaction.reply({ embeds: [createEmbed('Session lancée', 'La session de minage a commencé.')], flags: MessageFlags.Ephemeral });
+      }
+      return;
+    }
+
+    // --- BOUTONS DE LA MINE ---
+    if (interaction.isButton()) {
+      const [action, userId] = interaction.customId.split('_');
+
+      if (interaction.customId.startsWith('mine_accept_') || interaction.customId.startsWith('mine_refuse_')) {
+        const parts = interaction.customId.split('_');
+        const type = parts[1];
+        const inviterId = parts[2];
+        const inviteeId = parts[3];
+        if (interaction.user.id !== inviteeId) return interaction.reply({ content: "Cette invitation ne t'est pas destinée.", flags: MessageFlags.Ephemeral });
+        const invite = miningInvites.get(inviteeId);
+        if (!invite) return interaction.reply({ content: "Cette invitation n'existe plus.", flags: MessageFlags.Ephemeral });
+        const inviter = await client.users.fetch(inviterId).catch(() => null);
+        if (!inviter) return interaction.reply({ content: "L'inviteur est introuvable.", flags: MessageFlags.Ephemeral });
+        if (type === 'accept') {
+          if (!miningTeams.has(inviterId)) miningTeams.set(inviterId, []);
+          const team = miningTeams.get(inviterId);
+          if (!team.includes(inviteeId)) team.push(inviteeId);
+          miningTeams.set(inviterId, team);
+          miningInvites.delete(inviteeId);
+          await interaction.update({ content: 'Invitation acceptée !', components: [] });
+          await inviter.send({ content: `${interaction.user} a accepté ton invitation pour la session de minage.` }).catch(() => {});
+        } else {
+          miningInvites.delete(inviteeId);
+          await interaction.update({ content: 'Invitation refusée.', components: [] });
+          await inviter.send({ content: `${interaction.user} a refusé ton invitation.` }).catch(() => {});
+        }
+        return;
+      }
+
+      const session = miningSessions.get(interaction.message.id);
+      if (!session) return interaction.reply({ content: "Cette session de minage est terminée.", flags: MessageFlags.Ephemeral });
+      const isLeader = interaction.user.id === session.userId;
+      const isTeamMember = session.teamMembers.includes(interaction.user.id);
+      if (!isLeader && !isTeamMember) return interaction.reply({ content: "Tu ne fais pas partie de cette session.", flags: MessageFlags.Ephemeral });
+
+      if (interaction.customId.startsWith('mine_attack_')) {
+        await interaction.deferUpdate();
+        try {
+          const attackerId = interaction.user.id;
+          const pickaxeLevel = await economy.getPickaxeLevel(attackerId);
+          const pickaxe = miningData.pickaxeLevels.find(p => p.level === pickaxeLevel) || { damageMin: 1, damageMax: 1, name: "Inconnue", rarity: "?" };
+          let damage = Math.floor(Math.random() * (pickaxe.damageMax - pickaxe.damageMin + 1)) + pickaxe.damageMin;
+          if (Math.random() < 0.1) { damage *= 2; session.lastActionLog.unshift('Coup critique !'); }
+          session.currentOreHP -= damage;
+          session.lastActionLog.unshift(`${interaction.user.username} a infligé ${damage} dégâts au ${session.currentOreName}.`);
+          if (session.currentOreHP <= 0) {
+            const reward = session.currentOreReward;
+            session.loot.push({ type: 'aure', name: 'Aure', amount: reward });
+            await economy.addAure(session.userId, reward);
+            session.lastActionLog.unshift(`${session.currentOreName} détruit ! ${reward} Aure ajoutées au butin.`);
+            for (const [resName, resData] of Object.entries(miningData.resources)) {
+              if (Math.random() < resData.dropChance) {
+                session.loot.push({ type: 'resource', name: resData.name, amount: 1 });
+                await economy.addResource(session.userId, resName, 1);
+                session.lastActionLog.unshift(`${resData.name} obtenu !`);
+              }
+            }
+            session.floor += 1;
+            if (session.floor > 50) session.floor = 50;
+            session.currentOreMaxHP = calculateOreHP(session.floor, session.difficulty);
+            session.currentOreHP = session.currentOreMaxHP;
+            const diff = miningData.difficulties[session.difficulty];
+            const rewardMin = Math.floor(diff.minReward * (1 + session.floor * 0.1));
+            const rewardMax = Math.floor(diff.maxReward * (1 + session.floor * 0.1));
+            session.currentOreReward = Math.floor(Math.random() * (rewardMax - rewardMin + 1)) + rewardMin;
+            session.currentOreName = miningData.oreNames[session.difficulty][Math.floor(Math.random() * miningData.oreNames[session.difficulty].length)];
+          }
+          const embed = buildMineEmbed(session, pickaxe);
+          if (session.message) await session.message.edit({ embeds: [embed] }).catch(() => {});
+        } catch (error) { console.error('Erreur bouton attaque mine:', error); }
+        return;
+      }
+
+      if (interaction.customId.startsWith('mine_refresh_')) {
+        await interaction.deferUpdate();
+        try {
+          const pickaxeLevel = await economy.getPickaxeLevel(interaction.user.id);
+          const pickaxe = miningData.pickaxeLevels.find(p => p.level === pickaxeLevel) || { damageMin: 1, damageMax: 1, name: "Inconnue", rarity: "?" };
+          const embed = buildMineEmbed(session, pickaxe);
+          if (session.message) await session.message.edit({ embeds: [embed] }).catch(() => {});
+        } catch (error) { console.error('Erreur bouton actualiser mine:', error); }
+        return;
+      }
+
+      if (interaction.customId.startsWith('mine_loot_')) {
+        const lootSummary = session.loot.map(item => `- ${item.name}: ${item.amount}`).join('\n') || 'Aucun butin.';
+        await interaction.reply({ embeds: [createEmbed('Butin actuel', lootSummary)], flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      if (interaction.customId.startsWith('mine_claim_')) {
+        if (!isLeader) return interaction.reply({ content: "Seul le leader peut récupérer le butin.", flags: MessageFlags.Ephemeral });
+        const lootSummary = session.loot.map(item => `- ${item.name}: ${item.amount}`).join('\n') || 'Aucun butin.';
+        try {
+          await interaction.user.send({ embeds: [createEmbed('Butin récupéré', lootSummary)] });
+          session.loot = [];
+          await interaction.reply({ content: 'Butin envoyé en MP.', flags: MessageFlags.Ephemeral });
+        } catch { await interaction.reply({ content: 'Impossible d\'envoyer le MP.', flags: MessageFlags.Ephemeral }); }
+        return;
+      }
+
+      if (interaction.customId.startsWith('mine_auto_')) {
+        if (!isLeader) return interaction.reply({ content: "Seul le leader peut activer l'auto-mine.", flags: MessageFlags.Ephemeral });
+        const hasPass = await economy.getAutoMinePass(interaction.user.id);
+        if (!hasPass) return interaction.reply({ content: "Auto-Mine Pass requis.", flags: MessageFlags.Ephemeral });
+        session.autoMine = !session.autoMine;
+        if (session.autoMine) {
+          session.autoMineInterval = setInterval(async () => {
+            try {
+              const pickaxeLevel = await economy.getPickaxeLevel(session.userId);
+              const pickaxe = miningData.pickaxeLevels.find(p => p.level === pickaxeLevel) || { damageMin: 1, damageMax: 1 };
+              let damage = Math.floor(Math.random() * (pickaxe.damageMax - pickaxe.damageMin + 1)) + pickaxe.damageMin;
+              session.currentOreHP -= damage;
+              session.lastActionLog.unshift(`[Auto] ${damage} dégâts.`);
+              if (session.currentOreHP <= 0) {
+                const reward = session.currentOreReward;
+                session.loot.push({ type: 'aure', name: 'Aure', amount: reward });
+                await economy.addAure(session.userId, reward);
+                for (const [resName, resData] of Object.entries(miningData.resources)) {
+                  if (Math.random() < resData.dropChance) { session.loot.push({ type: 'resource', name: resData.name, amount: 1 }); await economy.addResource(session.userId, resName, 1); }
+                }
+                session.floor += 1;
+                session.currentOreMaxHP = calculateOreHP(session.floor, session.difficulty);
+                session.currentOreHP = session.currentOreMaxHP;
+                const diff = miningData.difficulties[session.difficulty];
+                const rewardMin = Math.floor(diff.minReward * (1 + session.floor * 0.1));
+                const rewardMax = Math.floor(diff.maxReward * (1 + session.floor * 0.1));
+                session.currentOreReward = Math.floor(Math.random() * (rewardMax - rewardMin + 1)) + rewardMin;
+                session.currentOreName = miningData.oreNames[session.difficulty][Math.floor(Math.random() * miningData.oreNames[session.difficulty].length)];
+              }
+              const embed = buildMineEmbed(session, pickaxe);
+              if (session.message) await session.message.edit({ embeds: [embed] }).catch(() => {});
+            } catch (error) { console.error('Erreur auto-mine:', error); clearInterval(session.autoMineInterval); session.autoMine = false; }
+          }, 5000);
+        } else { clearInterval(session.autoMineInterval); session.autoMineInterval = null; }
+        await interaction.reply({ content: `Auto-mine ${session.autoMine ? 'activé' : 'désactivé'}.`, flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      if (interaction.customId.startsWith('mine_stop_')) {
+        if (!isLeader) return interaction.reply({ content: "Seul le leader peut arrêter la session.", flags: MessageFlags.Ephemeral });
+        if (session.autoMineInterval) clearInterval(session.autoMineInterval);
+        miningSessions.delete(interaction.message.id);
+        if (session.message) await session.message.delete().catch(() => {});
+        await interaction.reply({ content: 'Session arrêtée.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      if (interaction.customId.startsWith('duel_')) {
+        const parts = interaction.customId.split('_');
+        const type = parts[1];
+        const challengerId = parts[2];
+        const targetId = parts[3];
+        const mise = parseInt(parts[4]);
+        if (interaction.user.id !== challengerId) return interaction.reply({ content: "Seul l'initiateur peut choisir.", flags: MessageFlags.Ephemeral });
+        const guild = interaction.guild;
+        const target = guild.members.cache.get(targetId);
+        if (!target) return interaction.reply({ content: "Cible introuvable.", flags: MessageFlags.Ephemeral });
+        const challengerTotal = await economy.getTotalBalance(challengerId);
+        const targetTotal = await economy.getTotalBalance(targetId);
+        if (challengerTotal < mise || targetTotal < mise) return interaction.update({ content: "Un des participants n'a plus assez de solde total.", embeds: [], components: [] });
+        const choice = type === 'pile' ? 0 : 1;
+        const result = Math.random() < 0.5 ? 0 : 1;
+        let winnerId, loserId;
+        if (choice === result) { winnerId = challengerId; loserId = targetId; } else { winnerId = targetId; loserId = challengerId; }
+        await economy.deductFromTotal(loserId, mise);
+        await economy.addToCash(winnerId, mise);
+        await economy.addTransaction(winnerId, `Traque gagnée contre ${target.user.username}`, mise);
+        await economy.addTransaction(loserId, `Traque perdue contre ${interaction.user.username}`, -mise);
+        await logAction(guild, `${interaction.user.username} a gagné ${mise} Élys contre ${target.user.username}`);
+        const resultEmbed = new EmbedBuilder().setColor('#f1c40f').setTitle('Résultat de la Traque').setDescription(`Le choix : ${choice === 0 ? 'Pile' : 'Face'}\nLe résultat : ${result === 0 ? 'Pile' : 'Face'}\n\n<@${winnerId}> gagne **${mise} Élys** !`).setTimestamp();
+        await interaction.update({ embeds: [resultEmbed], components: [] });
+        return;
+      }
+      return;
+    }
+    // --- COMMANDES SLASH ---
+    if (!interaction.isChatInputCommand()) return;
+    if (interaction.guild.id !== config.guildId) return;
+
+    const { commandName, options, user, member, guild } = interaction;
+    await economy.incrementCommandUsage(user.id);
+
+    if (commandName === 'test') return interaction.reply({ embeds: [createEmbed('Bot en ligne', 'Le bot fonctionne parfaitement !')] });
+    if (commandName === 'testapi') {
+      const target = options.getUser('membre');
+      const targetMember = guild.members.cache.get(target.id);
+      if (!targetMember) return interaction.reply({ embeds: [createEmbed('Erreur', 'Membre introuvable.')], flags: MessageFlags.Ephemeral });
+      await economy.addBalance(target.id, -500);
+      await logAction(guild, `${user.tag} a utilisé /testapi sur ${target.tag} (-500 Élys).`);
+      return interaction.reply({ embeds: [createEmbed('Test réussi', `${target} a perdu 500 Élys.`)] });
+    }
+
+    if (commandName === 'prix') {
+      const priceEmbed = new EmbedBuilder().setColor(config.embedColor).setTitle('Liste des pouvoirs et prix').setDescription('Voici tous les pouvoirs disponibles dans le shop :')
+        .addFields(powers.map(p => ({ name: `${p.emoji} ${p.name} - ${p.price ? `${p.price} Élys` : 'Événement'}`, value: p.description, inline: false }))).setTimestamp();
+      return interaction.reply({ embeds: [priceEmbed] });
+    }
+
+    if (commandName === 'guide') {
+      const embed = new EmbedBuilder().setColor(config.embedColor).setTitle('Guide des commandes').setDescription('**Bienvenue !** Voici la liste des commandes disponibles.')
+        .addFields(
+          { name: 'Général', value: '`/prix` : Liste des pouvoirs.\n`/cmdp` : Commandes des pouvoirs.\n`/guide` : Ce guide.', inline: false },
+          { name: 'Banque', value: '`/bank deposit <montant>` : Déposer (taxe 20%).\n`/bank withdraw <montant>` : Retirer.\n`/bank balance` : Solde.\n`/bank pret <montant> <jours>` : Faire un prêt (max 2 jours).\n`/bank dette` : Voir tes dettes.\n`/bank rembourser <montant>` : Rembourser.', inline: false },
+          { name: 'Minage', value: '`/mine` : Lancer une session.\n`/pioche info` : Stats de ta pioche.\n`/pioche use` : Utiliser une pioche.\n`/pioche upgrade` : Améliorer.\n`/craft auto_mine_pass` : Fabriquer pass.\n`/craft drop` : Multiplier les drops par 2.\n`/inventaire` : Voir ressources.', inline: false },
+          { name: 'Jeux', value: '`/pileouface @adv <mise>` : Pile ou face.\n`/bingo <récompense> [durée]` : Bingo.', inline: false },
+          { name: 'Infos', value: '`/cooldowns` : Cooldowns.\n`/etat` : Ton état.\n`/historique` : Transactions.\n`/stats` : Statistiques.', inline: false },
+          { name: 'Pouvoirs', value: '`/seirei`, `/kama @cible`, `/tsuiseki @adv <mise>`, `/ishii @source @cible`, `/bunri`, `/fuuin`, `/yoroi`, `/honoo @cible`, `/konton`, `/anarchie_mute`, `/hanamai`', inline: false },
+          { name: 'AFK', value: '`/afk` : Zone AFK (20 Aure / 30 sec, max 5h/jour).', inline: false },
+          { name: 'Trade', value: '`/trade @membre` : Échanger des objets avec un autre membre.', inline: false },
+          { name: 'Admin', value: '`/resetcd @membre` : Réinitialiser les cooldowns.\n`/addmine @membre <étage>` : Ajouter une mine.\n`/removemine @membre <étage>` : Retirer une mine.\n`/downgradepioche @membre <level> <raison>` : Rétrograder une pioche.', inline: false }
+        ).setFooter({ text: 'Pour plus d\'aide, contacte un administrateur.' }).setTimestamp();
+      return interaction.reply({ embeds: [embed] });
+    }
+
+    if (commandName === 'cmdp') {
+      const embed = new EmbedBuilder().setColor(config.embedColor).setTitle('Commandes des pouvoirs').setDescription('Voici les commandes pour activer les pouvoirs :')
+        .addFields(
+          { name: 'Elys', value: '`/seirei` ou `+seirei`', inline: true },
+          { name: 'La faux', value: '`/kama @cible` ou `+kama @cible`', inline: true },
+          { name: 'Traque', value: '`/tsuiseki @adversaire <mise>` ou `+tsuiseki @adversaire <mise>`', inline: true },
+          { name: 'Surgeon', value: '`/ishii @source @cible` ou `+ishii @source @cible`', inline: true },
+          { name: 'Séparateur', value: '`/bunri` ou `+bunri`', inline: true },
+          { name: 'Armure d\'Élys', value: '`/yoroi` ou `+yoroi`', inline: true },
+          { name: 'Flamme éternelle', value: '`/honoo @cible` ou `+honoo @cible`', inline: true },
+          { name: 'Anarchie (malus)', value: '`/konton` ou `+konton`', inline: true },
+          { name: 'Anarchie (mute local)', value: '`/anarchie_mute` ou `+anarchie_mute`', inline: true },
+          { name: 'Danse des fleurs', value: '`/hanamai` ou `+hanamai`', inline: true }
+        ).setTimestamp();
+      return interaction.reply({ embeds: [embed] });
+    }
+
+    if (commandName === 'bank') {
+      const sub = options.getSubcommand(); const montant = options.getInteger('montant');
+      if (sub === 'deposit') {
+        if (montant <= 0) return interaction.reply({ embeds: [createEmbed('Erreur', 'Montant invalide.')], flags: MessageFlags.Ephemeral });
+        const cash = await economy.getBalance(user.id);
+        if (cash < montant) return interaction.reply({ embeds: [createEmbed('Erreur', 'Tu n\'as pas assez d\'Élys en cash.')], flags: MessageFlags.Ephemeral });
+        const tax = Math.floor(montant * 0.20); const deposit = montant - tax;
+        await economy.addBalance(user.id, -montant); await economy.addBank(user.id, deposit); await economy.addTransaction(user.id, `Dépôt banque (taxe ${tax})`, deposit);
+        return interaction.reply({ embeds: [createEmbed('Banque', `Tu as déposé ${deposit} Élys en banque (taxe ${tax} Élys).`)] });
+      }
+      if (sub === 'withdraw') {
+        if (montant <= 0) return interaction.reply({ embeds: [createEmbed('Erreur', 'Montant invalide.')], flags: MessageFlags.Ephemeral });
+        const bank = await economy.getBank(user.id);
+        if (bank < montant) return interaction.reply({ embeds: [createEmbed('Erreur', 'Tu n\'as pas assez en banque.')], flags: MessageFlags.Ephemeral });
+        await economy.addBank(user.id, -montant); await economy.addBalance(user.id, montant); await economy.addTransaction(user.id, 'Retrait banque', montant);
+        return interaction.reply({ embeds: [createEmbed('Banque', `Tu as retiré ${montant} Élys de ta banque.`)] });
+      }
+      if (sub === 'balance') {
+        const bank = await economy.getBank(user.id); const cash = await economy.getBalance(user.id);
+        return interaction.reply({ embeds: [createEmbed('Solde', `Cash : ${cash} Élys\nBanque : ${bank} Élys`)] });
+      }
+      if (sub === 'pret') {
+        const existingLoans = await economy.getLoans(user.id);
+        if (existingLoans.length > 0) return interaction.reply({ embeds: [createEmbed('Erreur', 'Tu as déjà un prêt en cours ! Rembourse-le avant d\'en demander un nouveau.')], flags: MessageFlags.Ephemeral });
+        const jours = options.getInteger('jours');
+        if (!jours || jours <= 0) return interaction.reply({ embeds: [createEmbed('Erreur', 'Durée invalide.')], flags: MessageFlags.Ephemeral });
+        if (jours > 2) return interaction.reply({ embeds: [createEmbed('Erreur', 'La durée maximale de remboursement est de 2 jours.')], flags: MessageFlags.Ephemeral });
+        if (montant <= 0 || montant > 50000) return interaction.reply({ embeds: [createEmbed('Erreur', 'Le montant doit être entre 1 et 50 000 Élys.')], flags: MessageFlags.Ephemeral });
+        const interest = Math.floor(montant * 0.10 * jours); const total = montant + interest;
+        await economy.addLoan(user.id, montant, total, jours, interest); await economy.addBalance(user.id, montant); await economy.addTransaction(user.id, `Prêt bancaire (${montant} Élys sur ${jours} jours)`, montant);
+        return interaction.reply({ embeds: [createEmbed('Prêt accordé', `Tu as emprunté ${montant} Élys.\nÀ rembourser : ${total} Élys (intérêt ${interest} Élys).\nÉchéance : ${jours} jour(s).`)] });
+      }
+      if (sub === 'dette') {
+        const loans = await economy.getLoans(user.id);
+        if (!loans.length) return interaction.reply({ embeds: [createEmbed('Dettes', 'Tu n\'as aucune dette en cours.')] });
+        const fields = loans.map((loan, idx) => ({ name: `Dette #${idx + 1}`, value: `Montant restant : ${loan.remaining} Élys\nÉchéance : ${loan.dueDate.toLocaleDateString('fr-FR')} (${loan.days} jours)\nIntérêt : ${loan.interest} Élys`, inline: false }));
+        return interaction.reply({ embeds: [new EmbedBuilder().setColor(config.embedColor).setTitle('Tes dettes').addFields(fields)] });
+      }
+      if (sub === 'rembourser') {
+        const loans = await economy.getLoans(user.id);
+        if (!loans.length) return interaction.reply({ embeds: [createEmbed('Erreur', 'Tu n\'as aucune dette à rembourser.')], flags: MessageFlags.Ephemeral });
+        const loan = loans[0]; const debt = loan.remaining;
+        const cash = await economy.getBalance(user.id);
+        if (montant <= 0) return interaction.reply({ embeds: [createEmbed('Erreur', 'Montant invalide.')], flags: MessageFlags.Ephemeral });
+        if (cash < montant) return interaction.reply({ embeds: [createEmbed('Erreur', `Tu n'as pas assez de cash pour rembourser ${montant} Élys.`)], flags: MessageFlags.Ephemeral });
+        const actualPayment = Math.min(montant, debt);
+        await economy.repayLoan(user.id, 0, actualPayment);
+        await economy.addBalance(user.id, -actualPayment);
+        await economy.addTransaction(user.id, 'Remboursement prêt', -actualPayment);
+        const remainingDebt = debt - actualPayment;
+        if (remainingDebt <= 0) {
+          return interaction.reply({ embeds: [createEmbed('Remboursé', `Tu as remboursé ${actualPayment} Élys. Toute ta dette est soldée ! <a:VerifFonda:1533806937282449559>`)] });
+        } else {
+          return interaction.reply({ embeds: [createEmbed('Remboursé', `Tu as remboursé ${actualPayment} Élys. Il reste ${remainingDebt} Élys à payer. <a:VerifFonda:1533806937282449559>`)] });
+        }
+      }
+    }
+
+    if (commandName === 'pioche') {
+      const sub = options.getSubcommand();
+      const currentLevel = await economy.getPickaxeLevel(user.id);
+
+      if (sub === 'info') {
+        const cur = miningData.pickaxeLevels.find(p => p.level === currentLevel);
+        const embed = new EmbedBuilder().setColor('#8E44AD').setTitle('Ta pioche').addFields({ name: 'Nom', value: cur.name, inline: true }, { name: 'Rareté', value: cur.rarity, inline: true }, { name: 'Niveau', value: `${currentLevel}`, inline: true }, { name: 'Dégâts', value: `${cur.damageMin}-${cur.damageMax}`, inline: true });
+        if (currentLevel < 20) { const next = miningData.pickaxeLevels.find(p => p.level === currentLevel + 1); embed.addFields({ name: 'Prochaine pioche', value: `${next.name} (${next.rarity})`, inline: false }); }
+        return interaction.reply({ embeds: [embed] });
+      }
+
+      if (sub === 'upgrade') {
+        if (currentLevel >= 20) return interaction.reply({ embeds: [createEmbed('Pioche', 'Tu as la meilleure pioche !')] });
+        const next = miningData.pickaxeLevels.find(p => p.level === currentLevel + 1); const aure = await economy.getAure(user.id);
+        if (aure < next.upgradeCost) return interaction.reply({ embeds: [createEmbed("Pas assez d'Aure", `Il te faut ${next.upgradeCost} Aure.`)], flags: MessageFlags.Ephemeral });
+        for (const [resName, amount] of Object.entries(next.upgradeResources)) { const count = await economy.getResource(user.id, resName); if (count < amount) { const rn = miningData.resources[resName]?.name || resName; return interaction.reply({ embeds: [createEmbed('Matériaux manquants', `Il te faut ${amount} ${rn}.`)], flags: MessageFlags.Ephemeral }); } }
+        await economy.addAure(user.id, -next.upgradeCost); for (const [resName, amount] of Object.entries(next.upgradeResources)) await economy.removeResource(user.id, resName, amount); await economy.setPickaxeLevel(user.id, next.level); await economy.addTransaction(user.id, `Achat pioche ${next.name}`, -next.upgradeCost);
+        return interaction.reply({ embeds: [createEmbed('Pioche améliorée', `Tu as maintenant ${next.name} (${next.rarity}) avec ${next.damageMin}-${next.damageMax} dégâts.`)] });
+      }
+
+      if (sub === 'use') {
+        const ownedPickaxes = await economy.getOwnedPickaxes(user.id);
+        if (!ownedPickaxes || ownedPickaxes.length === 0) return interaction.reply({ embeds: [createEmbed('Erreur', 'Tu n\'as aucune pioche en réserve.')], flags: MessageFlags.Ephemeral });
+        const selectRow = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder().setCustomId(`pickaxe_use_${user.id}`).setPlaceholder('Choisis une pioche').addOptions(
+            ownedPickaxes.map(level => {
+              const p = miningData.pickaxeLevels.find(x => x.level === level);
+              return new StringSelectMenuOptionBuilder().setLabel(`${p.name} (Niv. ${level})`).setValue(String(level));
+            })
+          )
+        );
+        return interaction.reply({ content: 'Choisis ta pioche :', components: [selectRow], flags: MessageFlags.Ephemeral });
+      }
+    }
+
+    if (commandName === 'craft') {
+      const item = options.getString('objet');
+      if (item === 'auto_mine_pass') {
+        const frag = await economy.getResource(user.id, 'fragment_ame'); const eclat = await economy.getResource(user.id, 'eclat_lune');
+        if (frag < 10 || eclat < 5) return interaction.reply({ embeds: [createEmbed('Matériaux manquants', 'Il te faut 10 fragments d\'âme et 5 éclats de lune.')], flags: MessageFlags.Ephemeral });
+        await economy.removeResource(user.id, 'fragment_ame', 10); await economy.removeResource(user.id, 'eclat_lune', 5); await economy.setAutoMinePass(user.id, true);
+        return interaction.reply({ embeds: [createEmbed('Craft réussi', 'Tu as fabriqué un Auto-Mine Pass !')] });
+      }
+      if (item === 'drop') {
+        const frag = await economy.getResource(user.id, 'fragment_ame'); const noyau = await economy.getResource(user.id, 'noyau_volcan');
+        if (frag < 20 || noyau < 2) return interaction.reply({ embeds: [createEmbed('Matériaux manquants', 'Il te faut 20 fragments d\'âme et 2 noyaux volcan.')], flags: MessageFlags.Ephemeral });
+        await economy.removeResource(user.id, 'fragment_ame', 20); await economy.removeResource(user.id, 'noyau_volcan', 2); await economy.setAutoMinePass(user.id, true);
+        await economy.setDropMultiplier(user.id, 2);
+        return interaction.reply({ embeds: [createEmbed('Craft réussi', 'Tu as activé le **Drop x2** ! Tu auras 2x plus de matériaux en minant.')] });
+      }
+    }
+
+    if (commandName === 'addmine') {
+      if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ embeds: [createEmbed('Erreur', 'Seuls les administrateurs peuvent utiliser cette commande.')], flags: MessageFlags.Ephemeral });
+      const target = options.getUser('membre'); const etage = options.getInteger('etage');
+      const targetMember = guild.members.cache.get(target.id);
+      if (!targetMember) return interaction.reply({ embeds: [createEmbed('Erreur', 'Membre introuvable.')], flags: MessageFlags.Ephemeral });
+      await economy.addMineLevel(target.id, etage);
+      return interaction.reply({ embeds: [createEmbed('Mine ajoutée', `L'étage ${etage} a été ajouté à la mine de ${target}.`)] });
+    }
+
+    if (commandName === 'removemine') {
+      if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ embeds: [createEmbed('Erreur', 'Seuls les administrateurs peuvent utiliser cette commande.')], flags: MessageFlags.Ephemeral });
+      const target = options.getUser('membre'); const etage = options.getInteger('etage');
+      const targetMember = guild.members.cache.get(target.id);
+      if (!targetMember) return interaction.reply({ embeds: [createEmbed('Erreur', 'Membre introuvable.')], flags: MessageFlags.Ephemeral });
+      await economy.removeMineLevel(target.id, etage);
+      return interaction.reply({ embeds: [createEmbed('Mine retirée', `L'étage ${etage} a été retiré de la mine de ${target}.`)] });
+    }
+
+    if (commandName === 'downgradepioche') {
+      if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ embeds: [createEmbed('Erreur', 'Seuls les administrateurs peuvent utiliser cette commande.')], flags: MessageFlags.Ephemeral });
+      const target = options.getUser('membre'); const level = options.getInteger('level'); const raison = options.getString('raison');
+      const targetMember = guild.members.cache.get(target.id);
+      if (!targetMember) return interaction.reply({ embeds: [createEmbed('Erreur', 'Membre introuvable.')], flags: MessageFlags.Ephemeral });
+      if (level < 1 || level > 20) return interaction.reply({ embeds: [createEmbed('Erreur', 'Niveau invalide (1-20).')], flags: MessageFlags.Ephemeral });
+      await economy.setPickaxeLevel(target.id, level);
+      await logAction(guild, `${user.tag} a rétrogradé la pioche de ${target.tag} au niveau ${level} (Raison : ${raison})`);
+      return interaction.reply({ embeds: [createEmbed('Pioche rétrogradée', `${target} a maintenant une pioche niveau ${level}.\n**Raison :** ${raison}`)] });
+    }
+
+    if (commandName === 'resetcd') {
+      if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ embeds: [createEmbed('Erreur', 'Seuls les administrateurs peuvent utiliser cette commande.')], flags: MessageFlags.Ephemeral });
+      const target = options.getUser('membre');
+      await CooldownModel.deleteMany({ userId: target.id });
+      return interaction.reply({ embeds: [createEmbed('Cooldowns réinitialisés', `Les cooldowns de ${target} ont été réinitialisés.`)] });
+    }
+
+    // --- GESTION DU MENU PIOCHE USE ---
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith('pickaxe_use_')) {
+      const userId = interaction.customId.split('_')[2];
+      if (interaction.user.id !== userId) return interaction.reply({ content: "Ce n'est pas pour toi.", flags: MessageFlags.Ephemeral });
+      const level = parseInt(interaction.values[0]);
+      await economy.setPickaxeLevel(userId, level);
+      const pick = miningData.pickaxeLevels.find(p => p.level === level);
+      return interaction.update({ content: `Tu utilises maintenant ${pick.name} !`, embeds: [] });
+    }
+
+    if (commandName === 'mine') {
+      const invited = options.getUser('membre');
+      if (invited) {
+        if (invited.id === user.id) return interaction.reply({ embeds: [createEmbed('Erreur', 'Tu ne peux pas t\'inviter toi-même.')], flags: MessageFlags.Ephemeral });
+        if (miningInvites.has(invited.id)) return interaction.reply({ embeds: [createEmbed('Erreur', 'Ce membre a déjà une invitation en attente.')], flags: MessageFlags.Ephemeral });
+        miningInvites.set(invited.id, { inviterId: user.id, guildId: guild.id, status: 'pending' });
+        const embed = new EmbedBuilder().setColor(config.embedColor).setTitle('Invitation à rejoindre une équipe de minage').setDescription(`${user} t'invite à rejoindre sa session de minage.`);
+        const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`mine_accept_${user.id}_${invited.id}`).setLabel('Accepter').setStyle(ButtonStyle.Success), new ButtonBuilder().setCustomId(`mine_refuse_${user.id}_${invited.id}`).setLabel('Refuser').setStyle(ButtonStyle.Danger));
+        try { await invited.send({ embeds: [embed], components: [row] }); return interaction.reply({ embeds: [createEmbed('Invitation envoyée', `Invitation envoyée à ${invited}.`)], flags: MessageFlags.Ephemeral }); }
+        catch { miningInvites.delete(invited.id); return interaction.reply({ embeds: [createEmbed('Erreur', 'Impossible d\'envoyer un MP à ce membre.')], flags: MessageFlags.Ephemeral }); }
+      }
+      if ([...miningSessions.values()].some(s => s.userId === user.id)) return interaction.reply({ embeds: [createEmbed('Erreur', 'Tu as déjà une session de minage active.')], flags: MessageFlags.Ephemeral });
+      const team = miningTeams.get(user.id) || [];
+      const selectOptions = Object.entries(miningData.difficulties).map(([dn, dd]) => { let emoji; switch(dn) { case 'Facile': emoji = '🌱'; break; case 'Moyen': emoji = '🌊'; break; case 'Dur': emoji = '🟣'; break; case 'Extreme': emoji = '🟠'; break; case 'Enfer': emoji = '🔥'; break; case 'Cauchemar': emoji = '👹'; break; default: emoji = '⛏️'; } return new StringSelectMenuOptionBuilder().setLabel(`${emoji} ${dn}`).setValue(dn).setDescription(`${dd.minReward}-${dd.maxReward} Aure / étage`); });
+      const selectRow = new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`mine_select_${user.id}`).setPlaceholder('Choisis une difficulté...').addOptions(selectOptions));
+      const desc = team.length > 0 ? `**Équipe :** ${team.map(id => `<@${id}>`).join(', ')}\n\nSélectionne une difficulté pour lancer la session.` : 'Sélectionne une difficulté pour commencer à miner.';
+      return interaction.reply({ embeds: [createEmbed('Choisis ta difficulté', desc)], components: [selectRow] });
+    }
+
+    if (commandName === 'inventaire') {
+      const aure = await economy.getAure(user.id); const lvl = await economy.getPickaxeLevel(user.id); const pick = miningData.pickaxeLevels.find(p => p.level === lvl); const pass = await economy.getAutoMinePass(user.id) ? 'Oui' : 'Non';
+      const res = {}; for (const rn of Object.keys(miningData.resources)) res[rn] = await economy.getResource(user.id, rn);
+      const embed = new EmbedBuilder().setColor('#3498db').setTitle('Inventaire').addFields({ name: 'Aure', value: `${aure}`, inline: true }, { name: 'Pioche', value: `${pick.name} (Niv. ${lvl})`, inline: true }, { name: 'Auto-Mine Pass', value: pass, inline: true });
+      for (const [key, val] of Object.entries(res)) embed.addFields({ name: miningData.resources[key]?.name || key, value: `${val}`, inline: true });
+      return interaction.reply({ embeds: [embed] });
+    }
+
+    if (commandName === 'afk') {
+      const can = await economy.canClaimAfk(user.id); if (!can) return interaction.reply({ embeds: [createEmbed('Limite AFK atteinte', 'Tu as déjà utilisé tes 5h d\'AFK aujourd\'hui.')], flags: MessageFlags.Ephemeral });
+      if (afkIntervals.has(user.id)) return interaction.reply({ embeds: [createEmbed('Déjà en AFK', 'Tu es déjà en zone AFK.')], flags: MessageFlags.Ephemeral });
+      const interval = setInterval(async () => { const still = await economy.canClaimAfk(user.id); if (!still) { clearInterval(interval); afkIntervals.delete(user.id); return; } await economy.claimAfk(user.id); }, 30000);
+      afkIntervals.set(user.id, interval);
+      return interaction.reply({ embeds: [createEmbed('Zone AFK activée', 'Tu gagnes 20 Aure toutes les 30 secondes (max 5h/jour).')], flags: MessageFlags.Ephemeral });
+    }
+
+    if (commandName === 'trade') {
+      const target = options.getUser('membre');
+      if (!target || target.id === user.id) return interaction.reply({ embeds: [createEmbed('Erreur', 'Membre invalide.')], flags: MessageFlags.Ephemeral });
+      const tradeId = `T${Date.now()}${Math.floor(Math.random() * 10000)}`;
+      const trade = { id: tradeId, user1: user.id, user2: target.id, offer1: [], offer2: [], validated1: false, validated2: false };
+      await economy.saveTrade(user.id, trade); await economy.saveTrade(target.id, trade); activeTrades.set(tradeId, trade);
+      const embed = new EmbedBuilder().setColor('#3498db').setTitle('Échange').setDescription(`Chacun ajoute ce qu'il veut (Pioche, Matériaux) puis clique Valider. L'échange se fait quand vous avez validé tous les deux.`).addFields(
+        { name: `${user.username} donne`, value: '*(rien pour le moment)*', inline: false },
+        { name: `${target.username} donne`, value: '*(rien pour le moment)*', inline: false },
+        { name: 'Validation', value: `<@${user.id}> en attente · <@${target.id}> en attente`, inline: false }
+      );
+      const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`trade_pickaxe_${tradeId}`).setLabel('Ajouter Pioche').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId(`trade_materials_${tradeId}`).setLabel('Ajouter Matériaux').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId(`trade_validate_${tradeId}`).setLabel('Valider mon offre').setStyle(ButtonStyle.Success));
+      const row2 = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`trade_cancel_${tradeId}`).setLabel('Annuler').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId(`trade_clear_${tradeId}`).setLabel('Vider mon offre').setStyle(ButtonStyle.Secondary));
+      await interaction.reply({ embeds: [embed], components: [row, row2] });
+      return;
+    }
+
+    // --- FIN DU TRADE ---
+    return interaction.reply({ embeds: [createEmbed('Erreur', 'Commande inconnue.')], flags: MessageFlags.Ephemeral });
+  } catch (error) {
+    console.error('Erreur interaction:', error);
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction.reply({ embeds: [createEmbed('Erreur', 'Une erreur est survenue.')], flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
   }
+});
 
-  return deleted;
-}
+// Fonction utilitaire pour mettre à jour l'embed du trade
+async function updateTradeEmbed(interaction, trade) {
+  const offer1Text = trade.offer1.length ? trade.offer1.map(i => `- ${i.name}`).join('\n') : '*(rien pour le moment)*';
+  const offer2Text = trade.offer2.length ? trade.offer2.map(i => `- ${i.name}`).join('\n') : '*(rien pour le moment)*';
+  const validationText = `Validation : <@${trade.user1}> ${trade.validated1 ? 'Validé' : 'en attente'} · <@${trade.user2}> ${trade.validated2 ? 'Validé' : 'en attente'}`;
 
-async function sendLog(guild, type, details) {
-  const channel = guild.channels.cache.get(logsChannelId) || await guild.channels.fetch(logsChannelId).catch(() => null);
-  if (!channel || !channel.isTextBased()) return;
-
-  const embed = buildEmbed({
-    title: type === 'delete' ? 'Message supprimé' : 'Message modifié',
-    description: details.description,
-    color: type === 'delete' ? BOT_COLORS.error : BOT_COLORS.warn,
-    footer: 'Elysium • Logs'
-  })
+  const updatedEmbed = new EmbedBuilder()
+    .setColor('#3498db')
+    .setTitle('Échange')
+    .setDescription(`Chacun ajoute ce qu'il veut (Pioche, Matériaux) puis clique Valider.`)
     .addFields(
-      { name: 'Auteur', value: details.author, inline: true },
-      { name: 'Salon', value: details.channel, inline: true },
-      { name: 'Heure', value: details.time, inline: true }
+      { name: `<@${trade.user1}> donne`, value: offer1Text, inline: false },
+      { name: `<@${trade.user2}> donne`, value: offer2Text, inline: false },
+      { name: 'Validation', value: validationText, inline: false }
     );
 
-  if (details.before) {
-    embed.addFields({ name: 'Avant', value: details.before.slice(0, 1000) || 'Vide' });
-  }
-
-  if (details.after) {
-    embed.addFields({ name: 'Après', value: details.after.slice(0, 1000) || 'Vide' });
-  }
-
-  await channel.send({ embeds: [embed] });
+  await interaction.update({ embeds: [updatedEmbed] });
 }
 
-async function ensureTicketCategory(guild) {
-  const existing = guild.channels.cache.find((channel) => channel.type === ChannelType.GuildCategory && channel.name.toLowerCase() === 'tickets');
-  if (existing) return existing;
-
-  return guild.channels.create({
-    name: 'Tickets',
-    type: ChannelType.GuildCategory
-  });
-}
-
-async function createTicketChannel(guild, user, categoryValue) {
-  const category = await ensureTicketCategory(guild);
-  const safeName = `ticket-${user.username.toLowerCase().replace(/[^a-z0-9]/g, '-')}-${Date.now().toString().slice(-4)}`;
-
-  const permissionOverwrites = [
-    {
-      id: guild.roles.everyone.id,
-      type: 'role',
-      deny: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
-    },
-    {
-      id: user.id,
-      type: 'member',
-      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory]
-    },
-    ...adminIds.map((adminId) => ({
-      id: adminId,
-      type: 'member',
-      allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory]
-    }))
-  ];
-
-  const channel = await guild.channels.create({
-    name: safeName,
-    type: ChannelType.GuildText,
-    parent: category.id,
-    permissionOverwrites
-  });
-
-  const embed = new EmbedBuilder()
-      .setColor(BOT_COLORS.default)
-      .setTitle(`${EMOJIS.ticket} Ticket ouvert`)
-      .setDescription(`Bonjour ${user}, votre ticket a bien été créé pour la demande : **${categoryValue}**.`)
-      .addFields({ name: 'Fermeture', value: 'Utilisez `+close` pour fermer ce ticket.', inline: false })
-      .setFooter({ text: 'Elysium • Support Ticket' })
-      .setTimestamp();
-
-  writeTicketTranscriptHeader(channel, user, categoryValue);
-
-  const claimButton = new ButtonBuilder()
-    .setCustomId('claim_ticket')
-    .setLabel('Claim')
-    .setStyle(ButtonStyle.Success);
-
-  const row = new ActionRowBuilder().addComponents(claimButton);
-  await channel.send({
-    content: `<@${user.id}> <@&1533835913065398333> <@&1533499987810324571> <@&1533836673430065282>`,
-    embeds: [embed],
-    components: [row]
-  });
-  return channel;
-}
-
-async function refreshTicketPanel(guild) {
-  if (!guild || !ticketPanelChannelId) return;
-
-  const panelChannel = guild.channels.cache.get(ticketPanelChannelId) || await guild.channels.fetch(ticketPanelChannelId).catch(() => null);
-  if (!panelChannel || !panelChannel.isTextBased()) return;
-
-  const panels = loadTicketPanels();
-  const existingPanelId = panels[guild.id];
-  if (existingPanelId) {
-    try {
-      const oldMsg = await panelChannel.messages.fetch(existingPanelId);
-      await oldMsg.delete();
-    } catch {
-      // ignore
-    }
-  }
-
-  const embed = new EmbedBuilder()
-    .setColor(BOT_COLORS.default)
-    .setTitle(`${EMOJIS.categories} Panel de tickets`)
-    .setDescription('Choisis une option ci-dessous pour créer ton ticket. Les admins seront alertés automatiquement.')
-    .setFooter({ text: 'Elysium • Ticket System' })
-    .setTimestamp();
-
-  const menu = new StringSelectMenuBuilder()
-    .setCustomId('ticket_select')
-    .setPlaceholder('Sélectionne le type de ticket...')
-    .addOptions(TICKET_CATEGORIES.map((item) => ({
-      label: item.label,
-      value: item.value,
-      description: item.label,
-      emoji: item.emoji
-    })));
-
-  const row = new ActionRowBuilder().addComponents(menu);
-  const sent = await panelChannel.send({ embeds: [embed], components: [row] });
-
-  panels[guild.id] = sent.id;
-  saveTicketPanels(panels);
-  console.log(`🆕 Panneau de tickets rafraîchi dans ${panelChannel.name} (${guild.name}).`);
-}
-
-// ─── SLASH COMMANDS DATA ───────────────────────────────────────────
-const slashCommandsData = [
-  new SlashCommandBuilder()
-    .setName('help')
-    .setDescription('Affiche la liste des commandes'),
-  new SlashCommandBuilder()
-    .setName('warn')
-    .setDescription('Ajouter un avertissement à un membre')
-    .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre à avertir').setRequired(true))
-    .addStringOption(opt => opt.setName('raison').setDescription('Raison du warn').setRequired(false)),
-  new SlashCommandBuilder()
-    .setName('warnings')
-    .setDescription('Voir les avertissements d’un membre')
-    .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre concerné').setRequired(true)),
-  new SlashCommandBuilder()
-    .setName('clearwarnings')
-    .setDescription('Supprimer tous les warns d’un membre')
-    .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre concerné').setRequired(true)),
-  new SlashCommandBuilder()
-    .setName('ban')
-    .setDescription('Bannir un membre')
-    .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre à bannir').setRequired(true))
-    .addStringOption(opt => opt.setName('raison').setDescription('Raison du bannissement').setRequired(false)),
-  new SlashCommandBuilder()
-    .setName('unban')
-    .setDescription('Débannir un utilisateur par ID')
-    .addStringOption(opt => opt.setName('id').setDescription('ID de l’utilisateur à débannir').setRequired(true)),
-  new SlashCommandBuilder()
-    .setName('kick')
-    .setDescription('Expulser un membre')
-    .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre à expulser').setRequired(true))
-    .addStringOption(opt => opt.setName('raison').setDescription('Raison de l’expulsion').setRequired(false)),
-  new SlashCommandBuilder()
-    .setName('mute')
-    .setDescription('Rendre muet un membre (timeout)')
-    .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre à mute').setRequired(true))
-    .addStringOption(opt => opt.setName('durée').setDescription('Durée (ex: 10m, 1h, 1d)').setRequired(true))
-    .addStringOption(opt => opt.setName('raison').setDescription('Raison du mute').setRequired(false)),
-  new SlashCommandBuilder()
-    .setName('unmute')
-    .setDescription('Retirer le mute d’un membre')
-    .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre à unmute').setRequired(true)),
-  new SlashCommandBuilder()
-    .setName('purge')
-    .setDescription('Supprimer un certain nombre de messages')
-    .addIntegerOption(opt => opt.setName('nombre').setDescription('Nombre de messages à supprimer').setRequired(false)),
-  new SlashCommandBuilder()
-    .setName('setup-ticket-panel')
-    .setDescription('Configurer le panneau de tickets dans ce salon'),
-  new SlashCommandBuilder()
-    .setName('ticket')
-    .setDescription('Ouvrir un ticket manuellement')
-    .addStringOption(opt => opt.setName('type').setDescription('Type de ticket').setRequired(false)
-      .addChoices(...TICKET_CATEGORIES.map(cat => ({ name: cat.label, value: cat.value })))),
-  new SlashCommandBuilder()
-    .setName('rank')
-    .setDescription('Afficher le niveau d’un membre')
-    .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre (optionnel)').setRequired(false)),
-  new SlashCommandBuilder()
-    .setName('level')
-    .setDescription('Afficher le niveau d’un membre')
-    .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre (optionnel)').setRequired(false)),
-  new SlashCommandBuilder()
-    .setName('leaderboard')
-    .setDescription('Afficher le classement des membres'),
-  new SlashCommandBuilder()
-    .setName('top')
-    .setDescription('Afficher le classement des membres'),
-  new SlashCommandBuilder()
-    .setName('addlevel')
-    .setDescription('Ajouter des niveaux à un membre (admin)')
-    .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre concerné').setRequired(true))
-    .addIntegerOption(opt => opt.setName('niveaux').setDescription('Nombre de niveaux à ajouter').setRequired(true)),
-  new SlashCommandBuilder()
-    .setName('removelevel')
-    .setDescription('Retirer des niveaux à un membre (admin)')
-    .addUserOption(opt => opt.setName('utilisateur').setDescription('Membre concerné').setRequired(true))
-    .addIntegerOption(opt => opt.setName('niveaux').setDescription('Nombre de niveaux à retirer').setRequired(true)),
-  new SlashCommandBuilder()
-    .setName('rules')
-    .setDescription('Envoyer le règlement du serveur')
-];
-
-// ─── HELPERS ───────────────────────────────────────────────────────
-function parseDuration(durationString) {
-  const match = durationString.toLowerCase().match(/^(\d+)([smhd])$/);
-  if (!match) return null;
-  const value = parseInt(match[1], 10);
-  const unit = match[2];
-  switch (unit) {
-    case 's': return value * 1000;
-    case 'm': return value * 60 * 1000;
-    case 'h': return value * 60 * 60 * 1000;
-    case 'd': return value * 24 * 60 * 60 * 1000;
-    default: return null;
-  }
-}
-
-function getTargetUser(interaction) {
-  return interaction.options.getUser('utilisateur') || interaction.user;
-}
-
-// ─── SLASH COMMAND HANDLER ─────────────────────────────────────────
-async function handleSlashCommand(interaction) {
-  const { commandName, options, member, guild, user } = interaction;
-
-  const adminCommands = ['warn', 'warnings', 'clearwarnings', 'ban', 'unban', 'kick', 'mute', 'unmute', 'purge', 'addlevel', 'removelevel', 'rules'];
-  if (adminCommands.includes(commandName) && !isAdmin(user.id) && !hasStaffRole(member)) {
-    return interaction.reply({ content: 'Vous n’avez pas la permission d’utiliser cette commande.', flags: ['Ephemeral'] });
-  }
-
-  switch (commandName) {
-    case 'help': {
-      const embed = infoEmbed(`${EMOJIS.help} Commandes du bot`, `Préfixe : \`${prefix}\`\nVoici les commandes slash disponibles.`)
-        .addFields(
-          { name: '🛡️ Modération', value: '`/warn`, `/warnings`, `/clearwarnings`, `/ban`, `/unban`, `/kick`, `/mute`, `/unmute`, `/purge`' },
-          { name: '🎟️ Tickets', value: '`/ticket`, `/setup-ticket-panel`' },
-          { name: '📜 Info', value: '`/rules`, `/rank`, `/level`, `/leaderboard`, `/top`, `/addlevel`, `/removelevel`' }
-        )
-        .setFooter({ text: 'Elysium • Commandes' });
-      return interaction.reply({ embeds: [embed] });
-    }
-
-    case 'warn': {
-      const target = options.getUser('utilisateur', true);
-      const reason = options.getString('raison') || 'Aucune raison fournie';
-      const targetMember = await guild.members.fetch(target.id).catch(() => null);
-      if (!targetMember) return interaction.reply({ content: 'Membre introuvable.', flags: ['Ephemeral'] });
-      const updatedWarnings = addWarning(guild.id, target.id, user.id, reason);
-      const embed = warningEmbed(`${EMOJIS.warn} Warn ajouté`, `${target} a reçu un warn.`)
-        .addFields(
-          { name: 'Raison', value: reason, inline: true },
-          { name: 'Total', value: `${updatedWarnings.length}`, inline: true }
-        );
-      return interaction.reply({ embeds: [embed] });
-    }
-
-    case 'warnings': {
-      const target = options.getUser('utilisateur', true);
-      const warnings = loadWarnings()[guild.id]?.[target.id] || [];
-      const embed = infoEmbed(`${EMOJIS.warn} Warns de ${target.tag}`, warnings.length ? 'Voici les warns enregistrés :' : 'Aucun warn enregistré.');
-      if (warnings.length) {
-        warnings.forEach((warning, index) => {
-          embed.addFields({
-            name: `Warn ${index + 1}`,
-            value: `**Raison :** ${warning.reason}\n**Modérateur :** <@${warning.moderatorId}>\n**Date :** ${warning.date}`
-          });
-        });
-      }
-      return interaction.reply({ embeds: [embed] });
-    }
-
-    case 'clearwarnings': {
-      const target = options.getUser('utilisateur', true);
-      clearWarnings(guild.id, target.id);
-      return interaction.reply({ content: `Les warns de ${target} ont été supprimés.`, flags: ['Ephemeral'] });
-    }
-
-    case 'ban': {
-      const target = options.getUser('utilisateur', true);
-      const reason = options.getString('raison') || 'Aucune raison fournie';
-      const targetMember = await guild.members.fetch(target.id).catch(() => null);
-      if (!targetMember) return interaction.reply({ content: 'Membre introuvable.', flags: ['Ephemeral'] });
-      await targetMember.ban({ reason });
-      return interaction.reply({ content: `${target.tag} a été banni. Raison : ${reason}` });
-    }
-
-    case 'unban': {
-      const userId = options.getString('id', true);
-      try {
-        await guild.members.unban(userId);
-        return interaction.reply({ content: `L’utilisateur ${userId} a été débanni.` });
-      } catch {
-        return interaction.reply({ content: 'Impossible de débannir cet utilisateur.', flags: ['Ephemeral'] });
-      }
-    }
-
-    case 'kick': {
-      const target = options.getUser('utilisateur', true);
-      const reason = options.getString('raison') || 'Aucune raison fournie';
-      const targetMember = await guild.members.fetch(target.id).catch(() => null);
-      if (!targetMember) return interaction.reply({ content: 'Membre introuvable.', flags: ['Ephemeral'] });
-      await targetMember.kick(reason);
-      return interaction.reply({ content: `${target.tag} a été expulsé. Raison : ${reason}` });
-    }
-
-    case 'mute': {
-      const target = options.getUser('utilisateur', true);
-      const durationString = options.getString('durée', true);
-      const reason = options.getString('raison') || 'Aucune raison fournie';
-      const duration = parseDuration(durationString);
-      if (!duration) return interaction.reply({ content: 'Durée invalide. Utilisez un format comme `10m`, `1h`, `1d`.', flags: ['Ephemeral'] });
-      const targetMember = await guild.members.fetch(target.id).catch(() => null);
-      if (!targetMember) return interaction.reply({ content: 'Membre introuvable.', flags: ['Ephemeral'] });
-      await targetMember.timeout(duration, reason);
-      return interaction.reply({ content: `${target} a été rendu muet pendant ${durationString}. Raison : ${reason}` });
-    }
-
-    case 'unmute': {
-      const target = options.getUser('utilisateur', true);
-      const targetMember = await guild.members.fetch(target.id).catch(() => null);
-      if (!targetMember) return interaction.reply({ content: 'Membre introuvable.', flags: ['Ephemeral'] });
-      await targetMember.timeout(null, 'Unmute');
-      return interaction.reply({ content: `${target} n’est plus muet.` });
-    }
-
-    case 'purge': {
-      const requestedCount = options.getInteger('nombre');
-      if (!interaction.channel.permissionsFor(guild.members.me).has(PermissionFlagsBits.ManageMessages)) {
-        return interaction.reply({ content: 'Le bot n’a pas la permission de gérer les messages dans ce salon.', flags: ['Ephemeral'] });
-      }
-      const deletedCount = await purgeChannel(interaction.channel, requestedCount || null);
-      return interaction.reply({ content: `Purge terminée. ${deletedCount} message(s) supprimé(s).`, flags: ['Ephemeral'] });
-    }
-
-    case 'setup-ticket-panel': {
-      const panelChannel = interaction.channel;
-      const embed = infoEmbed(`${EMOJIS.categories} Panel de tickets`, 'Choisis un type de ticket et un salon sera créé automatiquement pour toi. Les admins pourront répondre directement.')
-        .setFooter({ text: 'Elysium • Ticket System' });
-      const sent = await panelChannel.send({ embeds: [embed] });
-      const panels = loadTicketPanels();
-      panels[guild.id] = sent.id;
-      saveTicketPanels(panels);
-      return interaction.reply({ content: 'Le panel de tickets a été configuré.', flags: ['Ephemeral'] });
-    }
-
-    case 'ticket': {
-      const type = options.getString('type') || 'aide';
-      const selected = TICKET_CATEGORIES.find((item) => item.value === type);
-      const value = selected ? selected.label : 'Aide';
-      const ticketUser = interaction.user;
-      const channel = await createTicketChannel(guild, ticketUser, value);
-      return interaction.reply({ content: `Ton ticket a été créé dans ${channel}.`, flags: ['Ephemeral'] });
-    }
-
-    case 'rank':
-    case 'level': {
-      const target = getTargetUser(interaction);
-      await initMongo();
-      const userData = await getUserLevelData(guild.id, target.id);
-      const currentLevel = userData.level || 1;
-      const currentXP = userData.xp || 0;
-      const neededXP = xpToNextLevel(currentLevel);
-      const progressBar = createProgressBar(currentXP, neededXP);
-      const percent = Math.floor((currentXP / neededXP) * 100);
-
-      const embed = infoEmbed(`${EMOJIS.welcome} Niveau de ${target.username}`, 'Voici les statistiques de progression sur **Elysium** :')
-        .setThumbnail(target.displayAvatarURL({ dynamic: true, size: 256 }))
-        .addFields(
-          { name: 'Niveau', value: `**${currentLevel}**`, inline: true },
-          { name: 'XP Actuel', value: `**${currentXP}** / ${neededXP} XP`, inline: true },
-          { name: 'Progression', value: `\`[${progressBar}]\` **${percent}%**` }
-        );
-      return interaction.reply({ embeds: [embed] });
-    }
-
-    case 'leaderboard':
-    case 'top': {
-      await initMongo();
-      let topUsers = [];
-      if (levelsCollection) {
-        topUsers = await levelsCollection.find({ guildId: guild.id })
-          .sort({ level: -1, xp: -1 })
-          .limit(10)
-          .toArray();
-      } else {
-        const stored = loadLevelsFromFile(levelsFile);
-        const guildEntries = stored[guild.id] || {};
-        topUsers = Object.entries(guildEntries)
-          .map(([userId, entry]) => ({ userId, ...entry }))
-          .sort((a, b) => (b.level || 1) - (a.level || 1) || (b.xp || 0) - (a.xp || 0))
-          .slice(0, 10);
-      }
-
-      if (topUsers.length === 0) {
-        return interaction.reply({ content: 'Aucun classement disponible pour l’instant.', flags: ['Ephemeral'] });
-      }
-
-      const leaderboardText = await Promise.all(topUsers.map(async (entry, index) => {
-        const user = await client.users.fetch(entry.userId).catch(() => null);
-        const username = user ? user.username : 'Utilisateur inconnu';
-        const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : '🔹';
-        return `${medal} **#${index + 1}** | **${username}** — Niv. **${entry.level || 1}** (${entry.xp || 0} XP)`;
-      }));
-
-      const embed = infoEmbed('🏆 Classement des membres les plus actifs', leaderboardText.join('\n'));
-      return interaction.reply({ embeds: [embed] });
-    }
-
-    case 'addlevel': {
-      const target = options.getUser('utilisateur', true);
-      const levelsToAdd = options.getInteger('niveaux', true);
-      if (levelsToAdd < 1) return interaction.reply({ content: 'Le nombre de niveaux doit être supérieur à 0.', flags: ['Ephemeral'] });
-      await initMongo();
-      const userData = await getUserLevelData(guild.id, target.id);
-      userData.level = (userData.level || 1) + levelsToAdd;
-      await saveUserLevelData(guild.id, target.id, userData);
-
-      const targetMember = await guild.members.fetch(target.id).catch(() => null);
-      if (targetMember) {
-        await assignLevelRole(guild, targetMember, userData.level);
-      }
-
-      const embed = successEmbed(`${EMOJIS.success} Niveaux ajoutés`, `${target} a reçu **+${levelsToAdd}** niveau(x) !\n\n**Nouveau niveau :** ${userData.level}`)
-        .setThumbnail(target.displayAvatarURL({ dynamic: true }));
-      return interaction.reply({ embeds: [embed] });
-    }
-
-    case 'removelevel': {
-      const target = options.getUser('utilisateur', true);
-      const levelsToRemove = options.getInteger('niveaux', true);
-      if (levelsToRemove < 1) return interaction.reply({ content: 'Le nombre de niveaux doit être supérieur à 0.', flags: ['Ephemeral'] });
-      await initMongo();
-      const userData = await getUserLevelData(guild.id, target.id);
-      const newLevel = Math.max(1, (userData.level || 1) - levelsToRemove);
-      userData.level = newLevel;
-      userData.xp = 0;
-      await saveUserLevelData(guild.id, target.id, userData);
-
-      const targetMember = await guild.members.fetch(target.id).catch(() => null);
-      if (targetMember) {
-        await assignLevelRole(guild, targetMember, newLevel);
-      }
-
-      const embed = warningEmbed(`${EMOJIS.warn} Niveaux retirés`, `${target} a perdu **${levelsToRemove}** niveau(x).\n\n**Nouveau niveau :** ${newLevel}`)
-        .setThumbnail(target.displayAvatarURL({ dynamic: true }));
-      return interaction.reply({ embeds: [embed] });
-    }
-
-    case 'rules': {
-      const attachment = new AttachmentBuilder(path.join(__dirname, 'assets', 'reglement.png')).setName('reglement.png');
-      const embed = buildEmbed({
-        title: '🌌 • Règlement d’Elysium',
-        description: 'Bienvenue sur Elysium ! @everyone\n\nNotre objectif est simple : créer une communauté où chacun peut discuter, jouer, rencontrer de nouvelles personnes et passer un bon moment dans une ambiance conviviale.\n\nMerci de respecter les quelques règles suivantes.',
-        color: BOT_COLORS.default,
-        thumbnail: 'https://cdn.discordapp.com/embed/avatars/0.png',
-        image: 'attachment://reglement.png',
-        footer: 'Elysium • Règlement'
-      })
-        .addFields(
-          { name: '🤝 • Respect', value: '• Respectez tous les membres du serveur.\n• Les insultes, le harcèlement, les discriminations et les provocations répétées n’ont pas leur place sur Elysium.' },
-          { name: '💬 • Utilisez les bons salons', value: '• Merci d’envoyer vos messages dans le salon correspondant.\n• Prenez quelques secondes pour vérifier où vous écrivez afin de garder le serveur organisé.' },
-          { name: '📢 • Spam & Publicité', value: '• Le spam, le flood et les mentions abusives sont interdits.\n• Toute publicité ou recrutement pour un autre serveur est interdit sans l’accord d’un membre du staff.' },
-          { name: '🖼️ • Contenus', value: 'Merci de ne pas partager :\n• Des contenus choquants ou inappropriés.\n• Des contenus à caractère sexuel.\n• Des liens malveillants ou destinés à nuire aux autres membres.' },
-          { name: '🎙️ • Salons vocaux', value: '• Respectez les personnes présentes.\n• Évitez les cris, les nuisances sonores et les comportements dérangeants.' },
-          { name: '💡 • Suggestions', value: 'Une idée pour améliorer Elysium ?\nN’hésitez pas à utiliser le salon <#1533505450690085036>.' },
-          { name: '🌟 • L’esprit d’Elysium', value: 'Elysium est avant tout une communauté basée sur le respect, la bonne humeur et le partage.\nMerci de contribuer à faire d’Elysium un endroit agréable pour tous. 💙' }
-        )
-        .setImage('attachment://reglement.png');
-
-      return interaction.reply({ embeds: [embed], files: [attachment] });
-    }
-
-    default:
-      return interaction.reply({ content: 'Commande inconnue.', flags: ['Ephemeral'] });
-  }
-}
-
-// ─── EVENTS ────────────────────────────────────────────────────────
-client.once('ready', async () => {
-  console.log(`Bot prêt : ${client.user.tag}`);
-
-  await initMongo();
+// --- COMMANDES TEXTUELLES + ---
+client.on(Events.MessageCreate, async (message) => {
+  if (message.author.bot || !message.guild || message.guild.id !== config.guildId) return;
+  if (!message.content.startsWith('+')) return;
+  const args = message.content.slice(1).trim().split(/ +/);
+  const command = args.shift().toLowerCase();
+  await economy.incrementCommandUsage(message.author.id);
 
   try {
-    if (guildId) {
-      const guild = client.guilds.cache.get(guildId) || await client.guilds.fetch(guildId).catch(() => null);
-      if (guild) {
-        await guild.commands.set(slashCommandsData);
-        console.log(`✅ Commandes slash enregistrées pour la guilde ${guild.name}`);
+    switch (command) {
+      case 'test': return message.channel.send({ embeds: [createEmbed('Bot en ligne', 'Le bot fonctionne parfaitement !')] });
+      case 'prix': { const priceEmbed = new EmbedBuilder().setColor(config.embedColor).setTitle('Liste des pouvoirs et prix').setDescription('Voici tous les pouvoirs disponibles dans le shop :').addFields(powers.map(p => ({ name: `${p.emoji} ${p.name} - ${p.price ? `${p.price} Élys` : 'Événement'}`, value: p.description, inline: false }))).setTimestamp(); return message.channel.send({ embeds: [priceEmbed] }); }
+      case 'guide': { const embed = new EmbedBuilder().setColor(config.embedColor).setTitle('Guide des commandes').setDescription('**Bienvenue !** Voici la liste des commandes disponibles.').addFields(
+        { name: 'Général', value: '`+prix` : Liste des pouvoirs.\n`+cmdp` : Commandes des pouvoirs.\n`+guide` : Ce guide.', inline: false },
+        { name: 'Banque', value: '`+bank deposit <montant>` : Déposer (taxe 20%).\n`+bank withdraw <montant>` : Retirer.\n`+bank balance` : Solde.', inline: false },
+        { name: 'Minage', value: '`+mine` : Lancer une session.\n`+pioche info` : Stats de ta pioche.\n`+pioche use` : Utiliser une pioche.\n`+craft auto_mine_pass` : Fabriquer pass.\n`+inventaire` : Voir ressources.', inline: false },
+        { name: 'Jeux', value: '`+pileouface @adv <mise>` : Pile ou face.\n`+bingo <récompense> [durée]` : Bingo.', inline: false },
+        { name: 'Infos', value: '`+cooldowns` : Cooldowns.\n`+etat` : Ton état.\n`+historique` : Transactions.\n`+stats` : Statistiques.', inline: false },
+        { name: 'Pouvoirs', value: '`+seirei`, `+kama @cible`, `+tsuiseki @adv <mise>`, `+ishii @source @cible`, `+bunri`, `+fuuin`, `+yoroi`, `+honoo @cible`, `+konton`, `+anarchie_mute`, `+hanamai`', inline: false }
+      ).setFooter({ text: 'Pour plus d\'aide, contacte un administrateur.' }).setTimestamp(); return message.channel.send({ embeds: [embed] }); }
+      case 'bank': {
+        const sub = args[0]?.toLowerCase(); const amount = parseInt(args[1]);
+        if (sub === 'deposit') { if (isNaN(amount) || amount <= 0) return message.reply({ embeds: [createEmbed('Erreur', 'Montant invalide.')] }); const cash = await economy.getBalance(message.author.id); if (cash < amount) return message.reply({ embeds: [createEmbed('Erreur', 'Pas assez de cash.')] }); const tax = Math.floor(amount * 0.20); await economy.addBalance(message.author.id, -amount); await economy.addBank(message.author.id, amount - tax); return message.channel.send({ embeds: [createEmbed('Banque', `Dépôt de ${amount - tax} Élys effectué (taxe ${tax}).`)] }); }
+        if (sub === 'withdraw') { if (isNaN(amount) || amount <= 0) return message.reply({ embeds: [createEmbed('Erreur', 'Montant invalide.')] }); const bank = await economy.getBank(message.author.id); if (bank < amount) return message.reply({ embeds: [createEmbed('Erreur', 'Pas assez en banque.')] }); await economy.addBank(message.author.id, -amount); await economy.addBalance(message.author.id, amount); return message.channel.send({ embeds: [createEmbed('Banque', `Retrait de ${amount} Élys effectué.`)] }); }
+        if (sub === 'balance') { const bank = await economy.getBank(message.author.id); const cash = await economy.getBalance(message.author.id); return message.channel.send({ embeds: [createEmbed('Solde', `Cash : ${cash} Élys\nBanque : ${bank} Élys`)] }); }
       }
-    } else {
-      await client.application.commands.set(slashCommandsData);
-      console.log('✅ Commandes slash enregistrées globalement');
+      case 'pioche': {
+        const sub = args[0]?.toLowerCase();
+        if (sub === 'info') { const lvl = await economy.getPickaxeLevel(message.author.id); const p = miningData.pickaxeLevels.find(x => x.level === lvl); return message.channel.send({ embeds: [createEmbed('Ta pioche', `**${p.name}** (Niv. ${lvl})\nDégâts : ${p.damageMin}-${p.damageMax}`)] }); }
+        if (sub === 'use') { const owned = await economy.getOwnedPickaxes(message.author.id); if (!owned.length) return message.reply({ embeds: [createEmbed('Erreur', 'Aucune pioche en réserve.')] }); const selectRow = new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`pickaxe_use_${message.author.id}`).setPlaceholder('Choisis une pioche').addOptions(owned.map(level => { const p = miningData.pickaxeLevels.find(x => x.level === level); return new StringSelectMenuOptionBuilder().setLabel(`${p.name} (Niv. ${level})`).setValue(String(level)); }))); return message.channel.send({ content: 'Choisis ta pioche :', components: [selectRow] }); }
+      }
+      case 'craft': {
+        const item = args[0]?.toLowerCase();
+        if (item === 'auto_mine_pass') { const frag = await economy.getResource(message.author.id, 'fragment_ame'); const eclat = await economy.getResource(message.author.id, 'eclat_lune'); if (frag < 10 || eclat < 5) return message.reply({ embeds: [createEmbed('Erreur', 'Il te faut 10 fragments et 5 éclats.')] }); await economy.removeResource(message.author.id, 'fragment_ame', 10); await economy.removeResource(message.author.id, 'eclat_lune', 5); await economy.setAutoMinePass(message.author.id, true); return message.channel.send({ embeds: [createEmbed('Craft réussi', 'Auto-Mine Pass fabriqué !')] }); }
+        if (item === 'drop') { const frag = await economy.getResource(message.author.id, 'fragment_ame'); const noyau = await economy.getResource(message.author.id, 'noyau_volcan'); if (frag < 20 || noyau < 2) return message.reply({ embeds: [createEmbed('Erreur', 'Il te faut 20 fragments et 2 noyaux.')] }); await economy.removeResource(message.author.id, 'fragment_ame', 20); await economy.removeResource(message.author.id, 'noyau_volcan', 2); await economy.setDropMultiplier(message.author.id, 2); return message.channel.send({ embeds: [createEmbed('Craft réussi', 'Drop x2 activé !')] }); }
+      }
+      case 'inventaire': case 'inv': { const aure = await economy.getAure(message.author.id); const lvl = await economy.getPickaxeLevel(message.author.id); const p = miningData.pickaxeLevels.find(x => x.level === lvl); const pass = await economy.getAutoMinePass(message.author.id) ? 'Oui' : 'Non'; const res = {}; for (const rn of Object.keys(miningData.resources)) res[rn] = await economy.getResource(message.author.id, rn); const embed = new EmbedBuilder().setColor('#3498db').setTitle('Inventaire').addFields({ name: 'Aure', value: `${aure}`, inline: true }, { name: 'Pioche', value: `${p.name} (Niv. ${lvl})`, inline: true }, { name: 'Pass', value: pass, inline: true }); for (const [key, val] of Object.entries(res)) embed.addFields({ name: miningData.resources[key]?.name || key, value: `${val}`, inline: true }); return message.channel.send({ embeds: [embed] }); }
+      case 'afk': { const can = await economy.canClaimAfk(message.author.id); if (!can) return message.reply({ embeds: [createEmbed('Limite AFK atteinte', 'Tu as déjà utilisé tes 5h.')] }); const interval = setInterval(async () => { if (await economy.canClaimAfk(message.author.id)) await economy.claimAfk(message.author.id); else clearInterval(interval); }, 30000); return message.channel.send({ embeds: [createEmbed('Zone AFK activée', 'Gagne 20 Aure / 30 sec !')] }); }
+      case 'cooldowns': { const all = await cooldowns.getAllCooldowns(message.author.id); if (!all.length) return message.channel.send({ embeds: [createEmbed('Cooldowns', 'Aucun cooldown actif.')] }); const fields = []; for (const rec of all) { const p = powers.find(p => p.name === rec.powerName); if (!p) continue; const rem = await cooldowns.getRemaining(message.author.id, rec.powerName, p.cooldownDays || 0); if (rem > 0) fields.push({ name: `${p.emoji} ${p.name}`, value: `Temps restant : ${cooldowns.formatRemaining(rem)}`, inline: false }); } return message.channel.send({ embeds: [new EmbedBuilder().setColor(config.embedColor).setTitle('Tes cooldowns').addFields(fields)] }); }
+      case 'etat': { const inv = await economy.isInvulnerable(message.author.id); const bank = await economy.getBank(message.author.id); const aure = await economy.getAure(message.author.id); const pl = await economy.getPickaxeLevel(message.author.id); const cash = await economy.getBalance(message.author.id); return message.channel.send({ embeds: [new EmbedBuilder().setColor(config.embedColor).setTitle('Ton état').addFields({ name: 'Cash', value: `${cash}`, inline: true }, { name: 'Banque', value: `${bank}`, inline: true }, { name: 'Aure', value: `${aure}`, inline: true }, { name: 'Pioche', value: `Niv. ${pl}`, inline: true }, { name: 'Invulnérable', value: inv ? 'Oui' : 'Non', inline: true })] }); }
+      default: return;
     }
-  } catch (error) {
-    console.error('❌ Erreur lors de l’enregistrement des commandes slash :', error.message);
-  }
-
-  if (guildId) {
-    const guild = client.guilds.cache.get(guildId) || await client.guilds.fetch(guildId).catch(() => null);
-    if (!guild) {
-      console.warn('Serveur introuvable à partir de GUILD_ID.');
-      return;
-    }
-
-    await refreshTicketPanel(guild);
-
-    setInterval(() => {
-      refreshTicketPanel(guild).catch((error) => {
-        console.error('❌ Erreur lors du rafraîchissement du panneau de tickets :', error.message);
-      });
-    }, 30 * 60 * 1000);
-  }
+  } catch (error) { console.error('Erreur commande texte:', error); message.channel.send({ embeds: [createEmbed('Erreur', 'Une erreur est survenue.')] }); }
 });
 
-client.on('guildMemberAdd', async (member) => {
-  if (guildId && member.guild.id !== guildId) return;
+// --- Serveur HTTP ---
+const server = http.createServer((req, res) => { res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end('Bot is alive!'); });
+server.listen(process.env.PORT || 3000, () => console.log(`✅ Serveur HTTP écoute sur le port ${process.env.PORT || 3000}`));
 
-  const channel = member.guild.channels.cache.get(welcomeChannelId) || await member.guild.channels.fetch(welcomeChannelId).catch(() => null);
-  if (!channel || !channel.isTextBased()) return;
-
-  const attachment = new AttachmentBuilder(path.join(__dirname, 'assets', 'bienvenue.png')).setName('bienvenue.png');
-  const embed = buildEmbed({
-      title: `${EMOJIS.welcome} Bienvenue sur Elysium`, 
-      description: `Salut ${member}, nous sommes ravis de te compter parmi nous ! Commence par découvrir les salons et lire les règles.`, 
-      color: BOT_COLORS.success,
-      thumbnail: member.displayAvatarURL({ dynamic: true }),
-      image: 'attachment://bienvenue.png',
-      footer: 'Elysium • Bienvenue'
-    });
-
-  await channel.send({ content: `<@${member.id}>`, embeds: [embed], files: [attachment] });
+// Connexion Discord
+console.log('✅ Le serveur est prêt, tentative de connexion à Discord...');
+client.login(config.token).catch(err => {
+  console.error('❌ ERREUR DE CONNEXION DISCORD :', err.message || err);
 });
-
-client.on('messageUpdate', async (oldMessage, newMessage) => {
-  if (!oldMessage.guild || oldMessage.author?.bot) return;
-  if (oldMessage.content === newMessage.content) return;
-
-  await sendLog(oldMessage.guild, 'update', {
-    description: `Un message a été modifié dans ${oldMessage.channel}.`,
-    author: oldMessage.author.tag,
-    channel: `#${oldMessage.channel.name}`,
-    time: formatTimestamp(new Date()),
-    before: oldMessage.content || 'Pas de contenu textuel',
-    after: newMessage.content || 'Pas de contenu textuel'
-  });
-});
-
-client.on('messageDelete', async (message) => {
-  if (!message.guild || message.author?.bot) return;
-
-  const content = message.content || (message.attachments?.size ? `[pièce jointe: ${message.attachments.map(a => a.name).join(', ')}]` : 'Contenu indisponible (suppression en masse)');
-
-  await sendLog(message.guild, 'delete', {
-    description: `Un message a été supprimé dans ${message.channel}.`,
-    author: message.author?.tag || 'Auteur inconnu',
-    channel: `#${message.channel.name}`,
-    time: formatTimestamp(new Date()),
-    before: content,
-    after: null
-  });
-});
-
-client.on('interactionCreate', async (interaction) => {
-  if (interaction.isButton() && interaction.customId === 'claim_ticket') {
-    const member = interaction.member;
-    if (!member || (!isAdmin(member.user.id) && !hasStaffRole(member))) {
-      await interaction.reply({ content: 'Seuls les admins/staff peuvent claim ce ticket.', flags: ['Ephemeral'] });
-      return;
-    }
-
-    const claimRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId('claim_ticket')
-        .setLabel('Claimé')
-        .setStyle(ButtonStyle.Success)
-        .setDisabled(true)
-    );
-
-    await interaction.message.edit({ components: [claimRow] });
-    appendTicketTranscript(interaction.channel, `[${new Date().toISOString()}] SYSTEM: Ticket claimé par ${member.user.tag}`);
-    await interaction.reply({ content: `Ticket claimé par ${member.user}.`, flags: ['Ephemeral'] });
-    await interaction.channel.send({ content: `${member.user} a claimé ce ticket.` });
-    return;
-  }
-
-  if (interaction.isStringSelectMenu() && interaction.customId === 'ticket_select') {
-    const ticketType = interaction.values[0];
-    const item = TICKET_CATEGORIES.find((cat) => cat.value === ticketType);
-    if (!item) {
-      await interaction.reply({ content: 'Impossible de trouver cette catégorie.', flags: ['Ephemeral'] });
-      return;
-    }
-
-    await interaction.deferReply({ flags: ['Ephemeral'] });
-
-    const replies = TICKET_REPLIES[item.value] || ['Je prépare ton ticket…'];
-    const response = replies[Math.floor(Math.random() * replies.length)];
-    await interaction.editReply(`*${response}*`);
-
-    const member = interaction.member?.user || interaction.user;
-    const channel = await createTicketChannel(interaction.guild, member, item.label);
-    await interaction.followUp({ content: `Ton ticket a été ouvert : ${channel}`, flags: ['Ephemeral'] });
-    return;
-  }
-
-  if (interaction.isChatInputCommand()) {
-    await handleSlashCommand(interaction);
-    return;
-  }
-});
-
-client.on('messageCreate', async (message) => {
-  if (!message.guild || message.author.bot) return;
-
-  if (message.channel.name.startsWith('ticket-') && !message.author.bot) {
-    const content = message.content?.trim() || (message.attachments.size ? `[pièce jointe: ${message.attachments.map((attachment) => attachment.name).join(', ')}]` : '[message vide]');
-    appendTicketTranscript(message.channel, `[${new Date().toISOString()}] ${message.author.tag}: ${content}`);
-  }
-
-  if (message.channel.id === AUTO_DELETE_CHANNEL_ID) {
-    const previous = lastMessageByChannel.get(message.channel.id);
-    if (previous && previous.id !== message.id) {
-      await previous.delete().catch(() => {});
-    }
-    lastMessageByChannel.set(message.channel.id, message);
-  }
-
-  await processLevel(message);
-
-  const parsed = getCommandParts(message.content);
-  if (!parsed) return;
-
-  const { command, args } = parsed;
-  if (!command) return;
-
-  if (command === 'help') {
-    const embed = infoEmbed(
-      `${EMOJIS.help} Commandes du bot`,
-      `Préfixe utilisé : \`${prefix}\`\nVoici toutes les commandes disponibles pour gérer le serveur et ouvrir des tickets.`
-    );
-
-    embed.addFields(
-      { name: '🛡️ Modération', value: '`+warn`, `+warnings`, `+clearwarnings`, `+ban`, `+unban`, `+kick`, `+mute`, `+unmute`, `+purge`' },
-      { name: '🎟️ Tickets', value: '`+ticket <type>`, `+setup-ticket-panel`, `+close`' },
-      { name: '📜 Info', value: '`+rules`, `+test image`, `+test emoji`, `+rank`, `+level`, `+leaderboard`, `+top`, `+addlevel`, `+removelevel`' }
-    );
-
-    embed.setFooter({ text: 'Elysium • Commandes' });
-    await message.channel.send({ embeds: [embed] });
-    return;
-  }
-
-  if (command === 'warn') {
-    if (!isAdmin(message.author.id)) return;
-    const target = message.mentions.members?.first() || (args[0] ? await message.guild.members.fetch(args[0]).catch(() => null) : null);
-    if (!target) return;
-    const reason = args.slice(1).join(' ') || 'Aucune raison fournie';
-    const updatedWarnings = addWarning(message.guild.id, target.id, message.author.id, reason);
-    const embed = warningEmbed(`${EMOJIS.warn} Warn ajouté`, `${target} a reçu un warn.`)
-      .addFields(
-        { name: 'Raison', value: reason, inline: true },
-        { name: 'Total', value: `${updatedWarnings.length}`, inline: true }
-      );
-    await message.channel.send({ embeds: [embed] });
-    return;
-  }
-
-  if (command === 'warnings') {
-    if (!isAdmin(message.author.id)) return;
-    const target = message.mentions.members?.first() || (args[0] ? await message.guild.members.fetch(args[0]).catch(() => null) : null);
-    if (!target) return;
-    const warnings = loadWarnings()[message.guild.id]?.[target.id] || [];
-    const embed = infoEmbed(`${EMOJIS.warn} Warns de ${target.user.tag}`, warnings.length ? 'Voici les warns enregistrés :' : 'Aucun warn enregistré.');
-    if (warnings.length) {
-      warnings.forEach((warning, index) => {
-        embed.addFields({
-          name: `Warn ${index + 1}`,
-          value: `**Raison :** ${warning.reason}\n**Modérateur :** <@${warning.moderatorId}>\n**Date :** ${warning.date}`
-        });
-      });
-    }
-    await message.channel.send({ embeds: [embed] });
-    return;
-  }
-
-  if (command === 'clearwarnings') {
-    if (!isAdmin(message.author.id)) return;
-    const target = message.mentions.members?.first() || (args[0] ? await message.guild.members.fetch(args[0]).catch(() => null) : null);
-    if (!target) return;
-    clearWarnings(message.guild.id, target.id);
-    await message.reply(`Les warns de ${target} ont été supprimés.`);
-    return;
-  }
-
-  if (command === 'ban') {
-    if (!isAdmin(message.author.id)) return;
-    const target = message.mentions.members?.first() || (args[0] ? await message.guild.members.fetch(args[0]).catch(() => null) : null);
-    if (!target) return;
-    const reason = args.slice(1).join(' ') || 'Aucune raison fournie';
-    await target.ban({ reason });
-    await message.channel.send(`${target.user.tag} a été banni. Raison : ${reason}`);
-    return;
-  }
-
-  if (command === 'unban') {
-    if (!isAdmin(message.author.id)) return;
-    const userId = args[0];
-    if (!userId) return;
-    try {
-      await message.guild.members.unban(userId);
-      await message.channel.send(`L’utilisateur ${userId} a été débanni.`);
-    } catch {
-      return;
-    }
-    return;
-  }
-
-  if (command === 'kick') {
-    if (!isAdmin(message.author.id)) return;
-    const target = message.mentions.members?.first() || (args[0] ? await message.guild.members.fetch(args[0]).catch(() => null) : null);
-    if (!target) return;
-    const reason = args.slice(1).join(' ') || 'Aucune raison fournie';
-    await target.kick(reason);
-    await message.channel.send(`${target.user.tag} a été expulsé. Raison : ${reason}`);
-    return;
-  }
-
-  if (command === 'mute') {
-    if (!isAdmin(message.author.id)) return;
-    const target = message.mentions.members?.first() || (args[0] ? await message.guild.members.fetch(args[0]).catch(() => null) : null);
-    if (!target) return;
-    const durationString = args[1];
-    if (!durationString) return;
-    const duration = parseDuration(durationString);
-    if (!duration) return;
-    const reason = args.slice(2).join(' ') || 'Aucune raison fournie';
-    await target.timeout(duration, reason);
-    await message.channel.send(`${target} a été rendu muet pendant ${durationString}. Raison : ${reason}`);
-    return;
-  }
-
-  if (command === 'unmute') {
-    if (!isAdmin(message.author.id)) return;
-    const target = message.mentions.members?.first() || (args[0] ? await message.guild.members.fetch(args[0]).catch(() => null) : null);
-    if (!target) return;
-    await target.timeout(null, 'Unmute');
-    await message.channel.send(`${target} n’est plus muet.`);
-    return;
-  }
-
-  if (command === 'purge') {
-    if (!isAdmin(message.author.id)) return;
-    if (!message.channel.permissionsFor(message.guild.members.me).has(PermissionFlagsBits.ManageMessages)) return;
-    const requestedCount = Number.parseInt(args[0], 10);
-    const deletedCount = await purgeChannel(message.channel, Number.isNaN(requestedCount) ? null : requestedCount);
-    await message.channel.send(`Purge terminée. ${deletedCount} message(s) supprimé(s).`);
-    return;
-  }
-
-  if (command === 'setup-ticket-panel') {
-    if (!isAdmin(message.author.id)) return;
-    const panelChannel = message.channel;
-    const embed = infoEmbed(`${EMOJIS.categories} Panel de tickets`, 'Choisis un type de ticket et un salon sera créé automatiquement pour toi. Les admins pourront répondre directement.')
-      .setFooter({ text: 'Elysium • Ticket System' });
-    const sent = await panelChannel.send({ embeds: [embed] });
-    const panels = loadTicketPanels();
-    panels[message.guild.id] = sent.id;
-    saveTicketPanels(panels);
-    await message.reply('Le panel de tickets a été configuré.');
-    return;
-  }
-
-  if (command === 'ticket') {
-    const type = (args[0] || 'aide').toLowerCase();
-    const selected = TICKET_CATEGORIES.find((item) => item.value === type || item.label.toLowerCase() === type);
-    const value = selected ? selected.label : 'Aide';
-    const member = await message.guild.members.fetch(message.author.id);
-    const channel = await createTicketChannel(message.guild, member.user, value);
-    await message.reply(`Ton ticket a été créé dans ${channel}.`);
-    return;
-  }
-
-  if (command === 'test' && args[0] === 'image') {
-    const imageFiles = ['bienvenue.png', 'reglement.png', 'lvl.png'];
-    const embeds = imageFiles.map((fileName) => {
-      return new EmbedBuilder()
-        .setColor(BOT_COLORS.info)
-        .setTitle(`${EMOJIS.info} ${fileName}`)
-        .setDescription(`Voici **${fileName}** envoyée par le bot.`)
-        .setImage(`attachment://${fileName}`)
-        .setFooter({ text: 'Elysium • Images du bot' })
-        .setTimestamp();
-    });
-
-    const attachments = imageFiles.map((fileName) => new AttachmentBuilder(path.join(__dirname, 'assets', fileName)).setName(fileName));
-    await message.channel.send({ content: 'Voici toutes les images du bot :', embeds, files: attachments });
-    return;
-  }
-
-  if (command === 'test' && args[0] === 'emoji') {
-    const emojiList = Object.entries(EMOJIS).map(([key, value]) => `**${key}** : ${value}`).join('\n');
-    const embed = infoEmbed(`${EMOJIS.info} Emojis du bot`, emojiList);
-    await message.channel.send({ embeds: [embed] });
-    return;
-  }
-
-  if (command === 'rank' || command === 'level') {
-    const target = message.mentions.members?.first()?.user || (args[0] ? (await client.users.fetch(args[0]).catch(() => null)) : message.author);
-    if (!target) return;
-    await initMongo();
-    const userData = await getUserLevelData(message.guild.id, target.id);
-    const currentLevel = userData.level || 1;
-    const currentXP = userData.xp || 0;
-    const neededXP = xpToNextLevel(currentLevel);
-    const progressBar = createProgressBar(currentXP, neededXP);
-    const percent = Math.floor((currentXP / neededXP) * 100);
-
-    const embed = infoEmbed(`${EMOJIS.welcome} Niveau de ${target.username}`, 'Voici les statistiques de progression sur **Elysium** :')
-      .setThumbnail(target.displayAvatarURL({ dynamic: true, size: 256 }))
-      .addFields(
-        { name: 'Niveau', value: `**${currentLevel}**`, inline: true },
-        { name: 'XP Actuel', value: `**${currentXP}** / ${neededXP} XP`, inline: true },
-        { name: 'Progression', value: `\`[${progressBar}]\` **${percent}%**` }
-      );
-
-    await message.channel.send({ embeds: [embed] });
-    return;
-  }
-
-  if (command === 'leaderboard' || command === 'top') {
-    await initMongo();
-
-    let topUsers = [];
-    if (levelsCollection) {
-      topUsers = await levelsCollection.find({ guildId: message.guild.id })
-        .sort({ level: -1, xp: -1 })
-        .limit(10)
-        .toArray();
-    } else {
-      const stored = loadLevelsFromFile(levelsFile);
-      const guildEntries = stored[message.guild.id] || {};
-      topUsers = Object.entries(guildEntries)
-        .map(([userId, entry]) => ({ userId, ...entry }))
-        .sort((a, b) => (b.level || 1) - (a.level || 1) || (b.xp || 0) - (a.xp || 0))
-        .slice(0, 10);
-    }
-
-    if (topUsers.length === 0) {
-      await message.reply('Aucun classement disponible pour l’instant.');
-      return;
-    }
-
-    const leaderboardText = await Promise.all(topUsers.map(async (entry, index) => {
-      const user = await client.users.fetch(entry.userId).catch(() => null);
-      const username = user ? user.username : 'Utilisateur inconnu';
-      const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : '🔹';
-      return `${medal} **#${index + 1}** | **${username}** — Niv. **${entry.level || 1}** (${entry.xp || 0} XP)`;
-    }));
-
-    const embed = infoEmbed('🏆 Classement des membres les plus actifs', leaderboardText.join('\n'));
-    await message.channel.send({ embeds: [embed] });
-    return;
-  }
-
-  if (command === 'addlevel') {
-    if (!isAdmin(message.author.id)) return;
-    const target = message.mentions.members?.first() || (args[0] ? await message.guild.members.fetch(args[0]).catch(() => null) : null);
-    if (!target) return;
-    const levelsToAdd = Number.parseInt(args[1], 10);
-    if (Number.isNaN(levelsToAdd) || levelsToAdd < 1) return;
-    await initMongo();
-    const userData = await getUserLevelData(message.guild.id, target.id);
-    userData.level = (userData.level || 1) + levelsToAdd;
-    await saveUserLevelData(message.guild.id, target.id, userData);
-
-    await assignLevelRole(message.guild, target, userData.level);
-
-    const embed = successEmbed(`${EMOJIS.success} Niveaux ajoutés`, `${target} a reçu **+${levelsToAdd}** niveau(x) !\n\n**Nouveau niveau :** ${userData.level}`)
-      .setThumbnail(target.displayAvatarURL({ dynamic: true }));
-
-    await message.channel.send({ embeds: [embed] });
-    return;
-  }
-
-  if (command === 'removelevel') {
-    if (!isAdmin(message.author.id)) return;
-    const target = message.mentions.members?.first() || (args[0] ? await message.guild.members.fetch(args[0]).catch(() => null) : null);
-    if (!target) return;
-    const levelsToRemove = Number.parseInt(args[1], 10);
-    if (Number.isNaN(levelsToRemove) || levelsToRemove < 1) return;
-    await initMongo();
-    const userData = await getUserLevelData(message.guild.id, target.id);
-    const newLevel = Math.max(1, (userData.level || 1) - levelsToRemove);
-    userData.level = newLevel;
-    userData.xp = 0;
-    await saveUserLevelData(message.guild.id, target.id, userData);
-
-    await assignLevelRole(message.guild, target, newLevel);
-
-    const embed = warningEmbed(`${EMOJIS.warn} Niveaux retirés`, `${target} a perdu **${levelsToRemove}** niveau(x).\n\n**Nouveau niveau :** ${newLevel}`)
-      .setThumbnail(target.displayAvatarURL({ dynamic: true }));
-
-    await message.channel.send({ embeds: [embed] });
-    return;
-  }
-
-  if (command === 'close') {
-    if (!message.channel.name.startsWith('ticket-')) return;
-    appendTicketTranscript(message.channel, `[${new Date().toISOString()}] SYSTEM: Ticket fermé par ${message.author.tag}`);
-    await message.channel.delete();
-    return;
-  }
-
-  if (command === 'rules') {
-    if (!isAdmin(message.author.id)) return;
-    const attachment = new AttachmentBuilder(path.join(__dirname, 'assets', 'reglement.png')).setName('reglement.png');
-    const embed = buildEmbed({
-      title: '🌌 • Règlement d’Elysium',
-      description: 'Bienvenue sur Elysium ! @everyone\n\nNotre objectif est simple : créer une communauté où chacun peut discuter, jouer, rencontrer de nouvelles personnes et passer un bon moment dans une ambiance conviviale.\n\nMerci de respecter les quelques règles suivantes.',
-      color: BOT_COLORS.default,
-      thumbnail: 'https://cdn.discordapp.com/embed/avatars/0.png',
-      image: 'attachment://reglement.png',
-      footer: 'Elysium • Règlement'
-    })
-      .addFields(
-        { name: '🤝 • Respect', value: '• Respectez tous les membres du serveur.\n• Les insultes, le harcèlement, les discriminations et les provocations répétées n’ont pas leur place sur Elysium.' },
-        { name: '💬 • Utilisez les bons salons', value: '• Merci d’envoyer vos messages dans le salon correspondant.\n• Prenez quelques secondes pour vérifier où vous écrivez afin de garder le serveur organisé.' },
-        { name: '📢 • Spam & Publicité', value: '• Le spam, le flood et les mentions abusives sont interdits.\n• Toute publicité ou recrutement pour un autre serveur est interdit sans l’accord d’un membre du staff.' },
-        { name: '🖼️ • Contenus', value: 'Merci de ne pas partager :\n• Des contenus choquants ou inappropriés.\n• Des contenus à caractère sexuel.\n• Des liens malveillants ou destinés à nuire aux autres membres.' },
-        { name: '🎙️ • Salons vocaux', value: '• Respectez les personnes présentes.\n• Évitez les cris, les nuisances sonores et les comportements dérangeants.' },
-        { name: '💡 • Suggestions', value: 'Une idée pour améliorer Elysium ?\nN’hésitez pas à utiliser le salon <#1533505450690085036>.' },
-        { name: '🌟 • L’esprit d’Elysium', value: 'Elysium est avant tout une communauté basée sur le respect, la bonne humeur et le partage.\nMerci de contribuer à faire d’Elysium un endroit agréable pour tous. 💙' }
-      )
-      .setImage('attachment://reglement.png');
-
-    await message.channel.send({ embeds: [embed], files: [attachment] });
-    return;
-  }
-});
-
-const port = Number(process.env.PORT) || 3000;
-const healthServer = http.createServer((req, res) => {
-  if (req.url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', service: 'elysium-bot' }));
-    return;
-  }
-
-  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-  res.end('Elysium bot is running.');
-});
-
-healthServer.listen(port, () => {
-  console.log(`Health server listening on port ${port}`);
-});
-
-client.on('error', (error) => {
-  console.error('❌ Discord Client Error:', error);
-});
-
-client.on('shardError', (error) => {
-  console.error('❌ Discord Shard Error:', error);
-});
-
-client.on('shardReady', (id) => {
-  console.log(`✅ Shard ${id} connectée à Discord`);
-});
-
-const token = process.env.TOKEN || process.env.BOT_TOKEN;
-
-console.log('🔑 TOKEN trouvé :', !!token);
-
-if (!token) {
-  console.error('❌ TOKEN Discord manquant');
-  process.exit(1);
-}
-
-client.login(token)
-  .then(() => {
-    console.log('✅ Connexion Discord réussie !');
-  })
-  .catch((error) => {
-    console.error('❌ ERREUR LOGIN DISCORD :', error);
-    process.exit(1);
-  });
